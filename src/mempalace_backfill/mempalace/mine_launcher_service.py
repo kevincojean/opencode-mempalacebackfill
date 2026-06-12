@@ -1,6 +1,9 @@
 import logging
-import subprocess
+import os
+import pty
 import re
+import select
+import subprocess
 from typing import final
 import inject
 from pymonad.either import Either, Left, Right
@@ -18,6 +21,12 @@ _LOCK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"timeout", re.IGNORECASE),
     re.compile(r"is held by", re.IGNORECASE),
 ]
+
+# If the mempalace process produces no output for this many seconds,
+# assume it is stuck or crashed and kill it. The mine can take several
+# minutes on a large export directory, but it should produce periodic
+# progress lines. 300s = 5 minutes of silence.
+_LINE_TIMEOUT = 300
 
 
 @final
@@ -39,31 +48,80 @@ class MineLauncherService:
 
         try:
             logging.info("Starting mempalace mine: %s", ' '.join(cmd))
-            # Prepend stdbuf to force line-buffered output from mempalace.
-            # mempalace's shebang uses `-E` which ignores PYTHONUNBUFFERED,
-            # and its print() calls lack flush=True, so piped output is
-            # block-buffered (nothing visible until the process finishes).
-            # stdbuf -oL sets stdout to line-buffered at the C library level.
-            stream_cmd = ["stdbuf", "-oL"] + cmd
+
+            # ── Pseudo-terminal for reliable real-time output ────────────
+            #
+            # We spawn mempalace through a PTY (pseudo-terminal) instead of a
+            # regular pipe.  A PTY is a kernel device pair:
+            #
+            #   master_fd  ← we read from this (the "terminal" side)
+            #   slave_fd   → child writes to this (the "program" side)
+            #
+            # The child process thinks stdout/stderr are a real terminal, so
+            # the C runtime picks line-buffered mode automatically.  Each
+            # print() that ends with \n flushes immediately — no buffering
+            # delay on the pipe.
+            #
+            # Why not stdbuf -oL?  stdbuf uses LD_PRELOAD which many
+            # environments disable (containers, setuid, AT_SECURE).  Why not
+            # PYTHONUNBUFFERED?  mempalace's shebang uses -E which ignores
+            # it.  The PTY approach works unconditionally.
+            master_fd, slave_fd = pty.openpty()
             process = subprocess.Popen(
-                stream_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
             )
+            os.close(slave_fd)
 
-            assert process.stdout is not None
+            logging.info("Mempalace mine PID %d started", process.pid)
+
             output_lines: list[str] = []
-            for line in iter(process.stdout.readline, ''):
-                line = line.rstrip('\n')
-                output_lines.append(line)
-                if line:
-                    logging.info("[mempalace] %s", line)
-            process.stdout.close()
+            buffer = ""
 
-            process.wait(timeout=120)
-            combined_output = '\n'.join(output_lines)
+            while True:
+                r, _, _ = select.select([master_fd], [], [], _LINE_TIMEOUT)
+                if not r:
+                    process.kill()
+                    process.wait()
+                    os.close(master_fd)
+                    combined = '\n'.join(output_lines)
+                    return Left(Error(
+                        f"mempalace mine produced no output for {_LINE_TIMEOUT}s. "
+                        f"Partial output: {combined}"
+                    ))
+
+                try:
+                    data = os.read(master_fd, 65536)
+                except OSError:
+                    # Common on PTY reads after child has exited (EIO).
+                    break
+
+                if not data:
+                    break
+
+                text = data.decode("utf-8", errors="replace")
+                buffer += text
+
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.rstrip("\r")
+                    output_lines.append(line)
+                    if line:
+                        logging.info("[mempalace] %s", line)
+
+            # Flush any remaining partial line.
+            if buffer:
+                buffer = buffer.rstrip("\r")
+                output_lines.append(buffer)
+                if buffer:
+                    logging.info("[mempalace] %s", buffer)
+
+            os.close(master_fd)
+            process.wait()
+            combined_output = "\n".join(output_lines)
 
             if process.returncode != 0:
                 if MineLauncherService._check_lock_error(combined_output):
@@ -82,8 +140,6 @@ class MineLauncherService:
 
         except FileNotFoundError:
             return Left(Error("mempalace not found in PATH"))
-        except subprocess.TimeoutExpired:
-            return Left(Error("mempalace mine timed out after 120s"))
         except Exception as e:
             return Left(Error(f"Unexpected error during mempalace mine: {str(e)}", Just(e)))
 
