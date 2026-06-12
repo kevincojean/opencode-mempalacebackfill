@@ -291,10 +291,7 @@ class BackfillApplication:
                 logging.info("Starting mempalace mine: wing=%s, dir=%s", wing, source_dir)
                 launch_result = launcher.launch(source_dir, wing, dry_run)
                 if launch_result.is_left():
-                    err = launch_result.monoid[0]
-                    console.print(f"[red]Mine failed: {err}[/red]")
-                    logging.error("Mine failed: %s", err)
-                    return Left(err)
+                    return launch_result
                 else:
                     mined = launch_result.value
                     num_str = f"{mined} drawer{'s' if mined != 1 else ''}"
