@@ -1,6 +1,8 @@
 # mempalace-backfill
 
-Backfill historical OpenCode sessions into MemPalace.
+Ingest all your previous OpenCode sessions into MemPalace.
+
+**Supported platforms**: Linux. Windows may work but is untested.
 
 ## 1. Why This Project
 
@@ -17,7 +19,8 @@ If you use OpenCode with MemPalace you want to also have MemPalace ingest your p
 ### Install via `uv` (recommended)
 
 ```bash
-cd /home/dehi/src/mempalace_backfill/
+git clone https://github.com/ohmyopenode/mempalace-backfill.git
+cd mempalace-backfill
 uv tool install .
 ```
 
@@ -26,7 +29,8 @@ This makes the `mempalace-backfill` command available globally.
 ### Install via `pip`
 
 ```bash
-pip install /home/dehi/src/mempalace_backfill/
+cd mempalace-backfill
+pip install .
 ```
 
 ### Verify installation
