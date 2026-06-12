@@ -96,7 +96,8 @@ class BackfillApplication:
             return None
 
     @staticmethod
-    def export(
+    def _export_sessions(
+        log_prefix: str,
         since: str = None,
         until: str = None,
         max_sessions: int = 1000,
@@ -109,24 +110,24 @@ class BackfillApplication:
         db_path: str = None,
     ) -> Either[Error, int]:
         try:
-            logging.info("Exporting sessions: max_sessions=%s, since=%s, until=%s, exclude_title=%s, min_messages=%s, output_dir=%s",
-                         max_sessions, since, until, exclude_title, min_messages, output_dir)
+            logging.info("%s sessions: max_sessions=%s, since=%s, until=%s, exclude_title=%s, min_messages=%s, output_dir=%s",
+                         log_prefix, max_sessions, since, until, exclude_title, min_messages, output_dir)
 
             inject.clear_and_configure(BackfillApplication._configure_injector)
-            
+
             config_svc = inject.instance(ConfigLoadService)
             overrides = BackfillApplication._build_overrides(locals())
             config_svc.load_config(overrides)
-            
+
             repo = inject.instance(SessionQueryRepository)
             state_repo = inject.instance(StateFileRepository)
             svc = inject.instance(MarkdownConversionService)
-            
+
             state_result = state_repo.load()
             state = state_result.value if state_result.is_right() else None
             if state:
                 logging.info("State loaded: %d sessions already exported", state.total_sessions_exported)
-            
+
             filters = {}
             if since:
                 filters["since"] = BackfillApplication._parse_date(since)
@@ -138,15 +139,15 @@ class BackfillApplication:
                 filters["min_messages"] = min_messages
             if exclude_title:
                 filters["exclude_title"] = exclude_title
-            
+
             logging.info("Querying sessions with filters: %s", filters)
             sessions_result = repo.get_sessions(filters)
             if sessions_result.is_left():
                 return sessions_result
-            
+
             sessions = sessions_result.value
             logging.info("Fetched %d sessions from database", len(sessions))
-            
+
             if state:
                 before = len(sessions)
                 sessions = [s for s in sessions if not state.is_exported(s.id)]
@@ -154,22 +155,22 @@ class BackfillApplication:
                 if before != after:
                     logging.info("After state filtering: %d -> %d sessions (skipped %d already exported)",
                                  before, after, before - after)
-            
+
             if not sessions:
                 console.print("[yellow]No new sessions to export.[/yellow]")
                 logging.info("No new sessions to export")
                 return Right(0)
-            
+
             if dry_run:
                 console.print(f"[cyan][DRY-RUN] Would export {len(sessions)} sessions to {output_dir}[/cyan]")
                 logging.info("DRY-RUN: Would export %d sessions to %s", len(sessions), output_dir)
                 return Right(len(sessions))
-            
-            logging.info("Exporting %d sessions to %s", len(sessions), output_dir)
+
+            logging.info("%s %d sessions to %s", log_prefix, len(sessions), output_dir)
             result = svc.export_all(sessions, output_dir, include_system_prompt)
             if result.is_left():
                 return result
-            
+
             exported_ids = result.value
             if state:
                 for s_id in exported_ids:
@@ -177,7 +178,7 @@ class BackfillApplication:
                 save_result = state_repo.save(state)
                 if save_result.is_left():
                     logging.warning("State file save failed (non-critical): %s", save_result.value)
-            
+
             count = len(exported_ids)
             console.print(f"[green]Successfully exported {count} sessions.[/green]")
             logging.info("Successfully exported %d sessions to %s", count, output_dir)
@@ -185,6 +186,28 @@ class BackfillApplication:
         except Exception as e:
             logging.error("Export failed: %s", e)
             return Left(Error(f"Export failed: {str(e)}", Just(e)))
+
+    @staticmethod
+    def export(
+        since: str = None,
+        until: str = None,
+        max_sessions: int = 1000,
+        min_messages: int = 1,
+        exclude_title: str = None,
+        output_dir: str = "./target/exports",
+        state_file: str = "./target/state.json",
+        include_system_prompt: bool = False,
+        dry_run: bool = False,
+        db_path: str = None,
+    ) -> Either[Error, int]:
+        return BackfillApplication._export_sessions(
+            log_prefix="Exporting",
+            since=since, until=until, max_sessions=max_sessions,
+            min_messages=min_messages, exclude_title=exclude_title,
+            output_dir=output_dir, state_file=state_file,
+            include_system_prompt=include_system_prompt,
+            dry_run=dry_run, db_path=db_path,
+        )
 
     @staticmethod
     def sync(
@@ -200,32 +223,39 @@ class BackfillApplication:
         db_path: str = None,
         wing: str = "opencode-sessions",
         mempalace_db_path: str = None,
+        mempalace_command: str = None,
     ) -> Either[Error, int]:
-        export_result = BackfillApplication.export(
+        export_result = BackfillApplication._export_sessions(
+            log_prefix="Syncing",
             since=since, until=until, max_sessions=max_sessions,
             min_messages=min_messages, exclude_title=exclude_title,
             output_dir=output_dir, state_file=state_file,
             include_system_prompt=include_system_prompt,
             dry_run=dry_run, db_path=db_path,
         )
-        
+
         if export_result.is_left():
             return export_result
-        
+
         exported_count = export_result.value
         if exported_count > 0:
+            config_svc = inject.instance(ConfigLoadService)
+            mempalace_overrides: dict[str, Any] = {}
             if mempalace_db_path:
-                config_svc = inject.instance(ConfigLoadService)
-                config_svc.load_config({"backfill": {"mempalace": {"palace_path": mempalace_db_path}}})
+                mempalace_overrides["palace_path"] = mempalace_db_path
+            if mempalace_command:
+                mempalace_overrides["command"] = mempalace_command
+            if mempalace_overrides:
+                config_svc.load_config({"backfill": {"mempalace": mempalace_overrides}})
             launcher = inject.instance(MineLauncherService)
             launch_result = launcher.launch(output_dir, wing, dry_run)
             if launch_result.is_left():
-                err = launch_result.value
+                err = launch_result.monoid[0]
                 console.print(f"[red]Mine failed: {err}[/red]")
                 return Left(err)
             else:
                 console.print(f"[green]Mined {launch_result.value} drawers into wing '{wing}'.[/green]")
-        
+
         return Right(exported_count)
 
 
@@ -281,6 +311,7 @@ def sync_cmd(
     db_path: str = typer.Option(None, "--db-path", help="Path to OpenCode SQLite database"),
     wing: str = typer.Option("opencode-sessions", "--wing", help="MemPalace wing to mine into"),
     mempalace_db_path: str = typer.Option(None, "--mempalace-db-path", help="Path to MemPalace palace database (maps to mempalace --palace)"),
+    mempalace_command: str = typer.Option(None, "--mempalace-command", help="Override mempalace command path (for testing)"),
 ):
     """Export sessions and mine them into MemPalace."""
     BackfillApplication._configure_logging()
@@ -297,6 +328,7 @@ def sync_cmd(
         db_path=db_path,
         wing=wing,
         mempalace_db_path=mempalace_db_path,
+        mempalace_command=mempalace_command,
     )
     if result.is_left():
         console.print(f"[red]Error: {result.monoid[0]}[/red]")

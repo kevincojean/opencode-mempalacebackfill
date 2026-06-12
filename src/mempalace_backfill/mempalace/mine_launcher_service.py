@@ -8,12 +8,25 @@ from pymonad.maybe import Just, Nothing
 from mempalace_backfill.alias import Error
 from mempalace_backfill.config_load_service import ConfigLoadService
 
+_LOCK_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"database is locked", re.IGNORECASE),
+    re.compile(r"lock", re.IGNORECASE),
+    re.compile(r"another process", re.IGNORECASE),
+    re.compile(r"already running", re.IGNORECASE),
+    re.compile(r"resource temporarily unavailable", re.IGNORECASE),
+    re.compile(r"timeout", re.IGNORECASE),
+]
+
 
 @final
 class MineLauncherService:
     @inject.autoparams()
     def __init__(self, config_service: ConfigLoadService) -> None:
         self._config_service = config_service
+
+    @staticmethod
+    def _check_lock_error(stderr: str) -> bool:
+        return any(p.search(stderr) for p in _LOCK_PATTERNS)
 
     def launch(self, export_dir: str, wing: str, dry_run: bool = False) -> Either[Error, int]:
         cmd = self._build_command(export_dir, wing)
@@ -31,8 +44,13 @@ class MineLauncherService:
             )
             
             if result.returncode != 0:
+                stderr = result.stderr.strip()
+                if MineLauncherService._check_lock_error(stderr):
+                    return Left(Error(
+                        f"mempalace is locked: {stderr}"
+                    ))
                 return Left(Error(
-                    f"mempalace mine failed with exit code {result.returncode}: {result.stderr.strip()}"
+                    f"mempalace mine failed with exit code {result.returncode}: {stderr}"
                 ))
 
             match = re.search(r"(\d+)\s+drawers?", result.stdout)

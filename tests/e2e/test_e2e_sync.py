@@ -1,3 +1,6 @@
+import os
+import stat
+import tempfile
 from pathlib import Path
 
 from tests.e2e.helpers import run_cli
@@ -183,6 +186,49 @@ class TestSyncWingPassthrough:
         )
         assert "opencode-sessions" in result.stdout, (
             f"Expected default wing in dry-run output, stdout: {result.stdout}"
+        )
+
+
+class TestSyncLockDetection:
+    """Acceptance criteria: sync fails when mempalace is locked."""
+
+    def test_given_mempalace_locked_when_sync_then_returns_lock_error(
+        self, fixture_db, tmp_output, tmp_state,
+    ):
+        """
+        GIVEN sessions to export AND mempalace is locked
+        WHEN I run `sync --mempalace-command <mock-lock>`
+        THEN it should fail with a lock error message.
+        """
+        run_cli([
+            "export",
+            "--db-path", fixture_db,
+            "--max-sessions", "2",
+            "--output-dir", tmp_output,
+            "--state-file", tmp_state,
+        ])
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
+            f.write("#!/bin/sh\necho 'database is locked' >&2\nexit 1\n")
+            lock_script = f.name
+        os.chmod(lock_script, os.stat(lock_script).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+        try:
+            result = run_cli([
+                "sync",
+                "--db-path", fixture_db,
+                "--output-dir", tmp_output,
+                "--state-file", tmp_state,
+                "--mempalace-command", lock_script,
+            ])
+        finally:
+            os.unlink(lock_script)
+
+        assert result.returncode != 0, (
+            f"Expected non-zero exit code for lock error, got 0: stdout={result.stdout}"
+        )
+        assert "locked" in result.stdout.lower() or "lock" in result.stdout.lower(), (
+            f"Expected lock-related error message, stdout: {result.stdout}"
         )
 
 
