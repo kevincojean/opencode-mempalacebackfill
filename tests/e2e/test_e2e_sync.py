@@ -3,20 +3,20 @@ import stat
 import tempfile
 from pathlib import Path
 
-from tests.e2e.helpers import run_cli
+from tests.e2e.helpers import run_cli, mock_mempalace_script
 
 
-class TestSyncNoNewSessions:
-    """Acceptance criteria: sync skips mining when nothing to export."""
+class TestSyncMineAlwaysRuns:
+    """Acceptance criteria: sync always runs the mine, even with no new exports."""
 
-    def test_given_no_new_sessions_when_sync_then_skips_mine_and_reports_nothing(
+    def test_given_no_new_sessions_when_sync_then_still_mines_existing_exports(
         self, fixture_db, tmp_output, tmp_state,
     ):
         """
         GIVEN all sessions have already been exported (tracked in state)
         WHEN I run `sync` with the same state file
         THEN export reports nothing new
-        AND mining is skipped (no mempalace invocation).
+        AND mining still runs on the existing exported files.
         """
         run_cli([
             "export",
@@ -26,17 +26,23 @@ class TestSyncNoNewSessions:
             "--state-file", tmp_state,
         ])
 
-        result = run_cli([
-            "sync",
-            "--db-path", fixture_db,
-            "--output-dir", tmp_output,
-            "--state-file", tmp_state,
-        ])
+        with mock_mempalace_script() as mock_cmd:
+            result = run_cli([
+                "sync",
+                "--db-path", fixture_db,
+                "--output-dir", tmp_output,
+                "--state-file", tmp_state,
+                "--mempalace-command", mock_cmd,
+            ])
         assert result.returncode == 0, (
             f"Expected exit code 0, got {result.returncode}: {result.stderr}"
         )
         assert "No new sessions to export" in result.stdout, (
             f"Expected 'No new sessions to export' when nothing to sync, "
+            f"stdout: {result.stdout}"
+        )
+        assert "Mined 0 drawers" in result.stdout, (
+            f"Expected mine to run even with no new exports, "
             f"stdout: {result.stdout}"
         )
 
@@ -77,13 +83,13 @@ class TestSyncDryRun:
             f"Expected no files written during dry run, found: {md_files}"
         )
 
-    def test_given_nonew_sessions_when_sync_dry_run_then_no_mine_dry_run(
+    def test_given_nonew_sessions_when_sync_dry_run_then_still_previews_mine_command(
         self, fixture_db, tmp_output, tmp_state,
     ):
         """
         GIVEN all sessions already exported
         WHEN I run `sync --dry-run`
-        THEN no mining dry-run command should appear
+        THEN the mine dry-run command still appears (mine always runs)
         AND exit code is 0.
         """
         run_cli([
@@ -107,8 +113,8 @@ class TestSyncDryRun:
         assert "No new sessions to export" in result.stdout, (
             f"Expected no-export message, stdout: {result.stdout}"
         )
-        assert "DRY-RUN" not in result.stdout, (
-            "Expected NO mine dry-run output when nothing to export, "
+        assert "DRY-RUN" in result.stdout, (
+            "Expected mine dry-run output even when nothing to export, "
             f"stdout: {result.stdout}"
         )
 
