@@ -4,6 +4,8 @@ Ingest all your previous OpenCode sessions into MemPalace.
 
 **Supported platforms**: Linux. Windows may work but is untested.
 
+**Disclaimer**: This software is offered for free with no guaranteed support. Versions tagged with `SNAPSHOT` are considered unstable and should not be used in production.
+
 ## 1. Why This Project
 
 If you use OpenCode with MemPalace you want to also have MemPalace ingest your past sessions. This project allows you to fetch past sessions and ingest them into MemPalace.
