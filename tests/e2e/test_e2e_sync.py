@@ -304,3 +304,32 @@ class TestSyncMaxSessions:
         assert ".tmp_sync_" not in result.stdout, (
             f"Expected no temp dir path without --max-sessions, stdout: {result.stdout}"
         )
+
+
+class TestSyncDefaultPaths:
+    """Acceptance criteria: default paths resolve against project root, not CWD."""
+
+    def test_given_no_output_dir_when_sync_from_subdir_then_resolves_to_project_root(
+        self,
+    ):
+        """
+        GIVEN the default output dir (no --output-dir flag)
+        WHEN I run `sync --dry-run` from a project subdirectory
+        THEN the mined dir is the project-root-absolute path, not CWD-relative.
+        """
+        project_root = Path(__file__).resolve().parent.parent.parent
+        subdir = str(project_root / "src")
+        expected_output_dir = str(project_root / "target" / "exports")
+
+        result = run_cli([
+            "sync",
+            "--dry-run",
+        ], cwd=subdir)
+
+        assert result.returncode == 0, (
+            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
+        )
+        assert expected_output_dir in result.stdout, (
+            f"Expected default output dir '{expected_output_dir}' in sync command, "
+            f"stdout: {result.stdout}"
+        )

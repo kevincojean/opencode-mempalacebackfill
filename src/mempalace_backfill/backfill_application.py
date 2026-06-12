@@ -19,6 +19,7 @@ from mempalace_backfill.db.session_query_repository import SessionQueryRepositor
 from mempalace_backfill.db.message_query_repository import MessageQueryRepository
 from mempalace_backfill.export.content_normalization_service import ContentNormalizationService
 from mempalace_backfill.export.markdown_conversion_service import MarkdownConversionService
+from mempalace_backfill.project_root import get_project_root
 from mempalace_backfill.state.state_file_repository import StateFileRepository
 from mempalace_backfill.mempalace.mine_launcher_service import MineLauncherService
 
@@ -337,13 +338,17 @@ def export_cmd(
     max_sessions: int = typer.Option(1000, "--max-sessions", help="Maximum sessions to export"),
     min_messages: int = typer.Option(5, "--min-messages", help="Minimum messages per session"),
     exclude_title: str = typer.Option(None, "--exclude-title", help="Regex to exclude session titles"),
-    output_dir: str = typer.Option("./target/exports", "--output-dir", help="Output directory"),
-    state_file: str = typer.Option("./target/state.json", "--state-file", help="State file path"),
+    output_dir: str | None = typer.Option(None, "--output-dir", help="Output directory (default: <project-root>/target/exports)"),
+    state_file: str | None = typer.Option(None, "--state-file", help="State file path (default: <project-root>/target/state.json)"),
     include_system_prompt: bool = typer.Option(False, "--include-system-prompt", help="Include system prompts"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing files"),
     db_path: str = typer.Option(None, "--db-path", help="Override SQLite database path"),
 ):
     """Export sessions to markdown files."""
+    if output_dir is None:
+        output_dir = str(get_project_root() / "target" / "exports")
+    if state_file is None:
+        state_file = str(get_project_root() / "target" / "state.json")
     BackfillApplication._configure_logging()
     result = BackfillApplication.export(
         since=since,
@@ -370,7 +375,7 @@ def export_cmd(
 
 @app.command("sync")
 def sync_cmd(
-    output_dir: str = typer.Option("./target/exports", "--output-dir", help="Output directory containing exported sessions"),
+    output_dir: str | None = typer.Option(None, "--output-dir", help="Output directory containing exported sessions (default: <project-root>/target/exports)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without executing"),
     wing: str = typer.Option("opencode-sessions", "--wing", help="MemPalace wing to mine into"),
     max_sessions: int | None = typer.Option(None, "--max-sessions", help="Maximum number of session files to mine (copies first N into a temp dir)"),
@@ -378,6 +383,8 @@ def sync_cmd(
     mempalace_command: str = typer.Option(None, "--mempalace-command", help="Override mempalace command path (for testing)"),
 ):
     """Mine existing exported sessions into MemPalace."""
+    if output_dir is None:
+        output_dir = str(get_project_root() / "target" / "exports")
     BackfillApplication._configure_logging()
     result = BackfillApplication.sync(
         output_dir=output_dir,
@@ -401,10 +408,14 @@ def sync_cmd(
 
 @app.command("clean")
 def clean_cmd(
-    output_dir: str = typer.Option("./target/exports", "--output-dir", help="Output directory to clean"),
-    state_file: str = typer.Option("./target/state.json", "--state-file", help="State file to remove"),
+    output_dir: str | None = typer.Option(None, "--output-dir", help="Output directory to clean (default: <project-root>/target/exports)"),
+    state_file: str | None = typer.Option(None, "--state-file", help="State file to remove (default: <project-root>/target/state.json)"),
 ):
     """Remove all contents from the output directory and reset the export state."""
+    if output_dir is None:
+        output_dir = str(get_project_root() / "target" / "exports")
+    if state_file is None:
+        state_file = str(get_project_root() / "target" / "state.json")
     BackfillApplication._configure_logging()
     result = BackfillApplication.clean(
         output_dir=output_dir,

@@ -5,11 +5,12 @@ import tempfile
 from contextlib import contextmanager
 
 
-def run_cli(args: list[str]) -> subprocess.CompletedProcess[str]:
+def run_cli(args: list[str], cwd: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["uv", "run", "mempalace-backfill"] + args,
         capture_output=True,
         text=True,
+        cwd=cwd,
     )
 
 

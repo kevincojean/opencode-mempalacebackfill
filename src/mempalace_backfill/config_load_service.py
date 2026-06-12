@@ -1,16 +1,20 @@
 import os
 from typing import final, Any
+from pathlib import Path
 from mempalace_backfill.config_model import Config
+from mempalace_backfill.project_root import get_project_root
 
 @final
 class ConfigLoadService:
     def __init__(self):
         self._overrides = {}
+        self._project_root = get_project_root()
 
     def load_config(self, overrides: dict[str, Any] = None) -> Config:
         if overrides:
             self._overrides = self._deep_merge(self._overrides, overrides)
         
+        root = self._project_root
         default_config: Config = {
             "backfill": {
                 "opencode": {
@@ -21,8 +25,8 @@ class ConfigLoadService:
                 },
                 "source_dir": ".",
                 "patterns": ["*.log", "*.md"],
-                "state_file": "./target/state.json",
-                "output_dir": "./target/exports"
+                "state_file": str(root / "target" / "state.json"),
+                "output_dir": str(root / "target" / "exports")
             }
         }
         
