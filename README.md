@@ -6,11 +6,11 @@ Ingest all your previous OpenCode sessions into MemPalace.
 
 **Disclaimer**: This software is offered for free with no guaranteed support. Versions tagged with `rc (release candidate)` are considered unstable and should not be used in production.
 
-## 1. Why This Project
+## Why This Project
 
 If you use OpenCode with MemPalace you want to also have MemPalace ingest your past sessions. This project allows you to fetch past sessions and ingest them into MemPalace.
 
-## 2. Installation
+## Installation
 
 ### Prerequisites
 
@@ -47,7 +47,7 @@ mempalace-backfill --help
 
 </details>
 
-## 3. Configuration
+## Configuration
 
 ### Environment Variables
 
@@ -55,7 +55,7 @@ mempalace-backfill --help
 |----------|----------|---------|-------------|
 | `LOG_LEVEL` | Optional | `INFO` | Python log level. Set to `DEBUG` for verbose output, `WARNING` to suppress info logs, or `ERROR` for errors only. |
 
-## 4. Execution and Parameters
+## Execution and Parameters
 
 ### Commands
 
@@ -132,24 +132,6 @@ After pulling changes from the upstream repository, you can install the latest v
 ```bash
 mempalace-backfill reinstall
 ```
-
-## 6. Test Execution
-
-Tests use a fixture SQLite database with 3 pre-seeded sessions and temp directories for output and state — no external dependencies or real OpenCode database needed.
-
-### Prerequisites
-
-```bash
-uv sync --group test
-```
-
-### Run all tests
-
-```bash
-mempalace-backfill test
-```
-
-All arguments after `test` are forwarded to pytest. See the [`test` command](#test) section for more options.
 
 ## License
 
