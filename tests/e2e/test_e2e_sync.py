@@ -6,141 +6,61 @@ from pathlib import Path
 from tests.e2e.helpers import run_cli, mock_mempalace_script
 
 
-class TestSyncMineAlwaysRuns:
-    """Acceptance criteria: sync always runs the mine, even with no new exports."""
+class TestSyncBasic:
+    """Acceptance criteria: sync mines existing exported sessions."""
 
-    def test_given_no_new_sessions_when_sync_then_still_mines_existing_exports(
-        self, fixture_db, tmp_output, tmp_state,
+    def test_given_existing_exports_when_sync_then_mines(
+        self, tmp_output,
     ):
         """
-        GIVEN all sessions have already been exported (tracked in state)
-        WHEN I run `sync` with the same state file
-        THEN export reports nothing new
-        AND mining still runs on the existing exported files.
+        GIVEN an output directory with exported markdown files
+        WHEN I run `sync` with a mock mempalace
+        THEN mine runs successfully.
         """
-        run_cli([
-            "export",
-            "--db-path", fixture_db,
-            "--max-sessions", "3",
-            "--output-dir", tmp_output,
-            "--state-file", tmp_state,
-        ])
+        Path(tmp_output, "session_001.md").write_text("# Session 1")
+        Path(tmp_output, "session_002.md").write_text("# Session 2")
 
         with mock_mempalace_script() as mock_cmd:
             result = run_cli([
                 "sync",
-                "--db-path", fixture_db,
                 "--output-dir", tmp_output,
-                "--state-file", tmp_state,
                 "--mempalace-command", mock_cmd,
             ])
         assert result.returncode == 0, (
             f"Expected exit code 0, got {result.returncode}: {result.stderr}"
         )
-        assert "No new sessions to export" in result.stdout, (
-            f"Expected 'No new sessions to export' when nothing to sync, "
-            f"stdout: {result.stdout}"
-        )
-        assert "Mined 0 drawers" in result.stdout, (
-            f"Expected mine to run even with no new exports, "
-            f"stdout: {result.stdout}"
+        assert "Mined" in result.stdout, (
+            f"Expected mine output, stdout: {result.stdout}"
         )
 
 
 class TestSyncDryRun:
-    """Acceptance criteria: --dry-run skips actual mempalace invocation."""
+    """Acceptance criteria: --dry-run skips the mempalace invocation."""
 
-    def test_given_unexported_sessions_when_sync_dry_run_then_previews_export_and_mine(
-        self, fixture_db, tmp_output, tmp_state,
-    ):
-        """
-        GIVEN a database with 3 sessions, none exported yet
-        WHEN I run `sync --max-sessions 2 --dry-run`
-        THEN it shows "Would export 2 sessions"
-        AND shows the mempalace command that would run
-        AND No files are written.
-        """
-        result = run_cli([
-            "sync",
-            "--db-path", fixture_db,
-            "--max-sessions", "2",
-            "--dry-run",
-            "--output-dir", tmp_output,
-            "--state-file", tmp_state,
-        ])
-        assert result.returncode == 0, (
-            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
-        )
-        assert "Would export 2 sessions" in result.stdout, (
-            f"Expected export preview, stdout: {result.stdout}"
-        )
-        assert "DRY-RUN" in result.stdout, (
-            f"Expected mining dry-run output, stdout: {result.stdout}"
-        )
-
-        md_files = list(Path(tmp_output).glob("*.md"))
-        assert len(md_files) == 0, (
-            f"Expected no files written during dry run, found: {md_files}"
-        )
-
-    def test_given_nonew_sessions_when_sync_dry_run_then_still_previews_mine_command(
-        self, fixture_db, tmp_output, tmp_state,
-    ):
-        """
-        GIVEN all sessions already exported
-        WHEN I run `sync --dry-run`
-        THEN the mine dry-run command still appears (mine always runs)
-        AND exit code is 0.
-        """
-        run_cli([
-            "export",
-            "--db-path", fixture_db,
-            "--max-sessions", "3",
-            "--output-dir", tmp_output,
-            "--state-file", tmp_state,
-        ])
-
-        result = run_cli([
-            "sync",
-            "--db-path", fixture_db,
-            "--dry-run",
-            "--output-dir", tmp_output,
-            "--state-file", tmp_state,
-        ])
-        assert result.returncode == 0, (
-            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
-        )
-        assert "No new sessions to export" in result.stdout, (
-            f"Expected no-export message, stdout: {result.stdout}"
-        )
-        assert "DRY-RUN" in result.stdout, (
-            "Expected mine dry-run output even when nothing to export, "
-            f"stdout: {result.stdout}"
-        )
-
-
-class TestSyncErrorHandling:
-    """Acceptance criteria: sync propagates export errors."""
-
-    def test_given_nonexistent_db_when_sync_then_returns_error(
+    def test_given_existing_exports_when_sync_dry_run_then_previews_command(
         self, tmp_output,
     ):
         """
-        GIVEN a non-existent database path
-        WHEN I run `sync --db-path /nonexistent/test.db`
-        THEN it should exit with a non-zero code
-        AND print an error message.
+        GIVEN an output directory with exported files
+        WHEN I run `sync --dry-run`
+        THEN it shows the DRY-RUN command
+        AND no actual mine is executed.
         """
+        Path(tmp_output, "session_001.md").write_text("# Session 1")
+
         result = run_cli([
             "sync",
-            "--db-path", "/nonexistent/test.db",
             "--output-dir", tmp_output,
+            "--dry-run",
         ])
-        assert result.returncode != 0, (
-            f"Expected non-zero exit code, got 0: stdout={result.stdout}"
+        assert result.returncode == 0, (
+            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
         )
-        assert "Error" in result.stdout, (
-            f"Expected 'Error' in stdout, got: {result.stdout}"
+        assert "DRY-RUN" in result.stdout, (
+            f"Expected DRY-RUN output, stdout: {result.stdout}"
+        )
+        assert "Command:" in result.stdout, (
+            f"Expected 'Command:' in dry-run output, stdout: {result.stdout}"
         )
 
 
@@ -148,21 +68,19 @@ class TestSyncWingPassthrough:
     """Acceptance criteria: --wing flag reaches the mempalace command."""
 
     def test_given_custom_wing_when_sync_dry_run_then_wing_appears_in_command(
-        self, fixture_db, tmp_output, tmp_state,
+        self, tmp_output,
     ):
         """
-        GIVEN a database with sessions
-        WHEN I run `sync --wing my-test-wing --max-sessions 1 --dry-run`
+        GIVEN an output directory with files
+        WHEN I run `sync --wing my-test-wing --dry-run`
         THEN the wing name appears in the mining dry-run command output.
         """
+        Path(tmp_output, "session_001.md").write_text("# Session 1")
         result = run_cli([
             "sync",
-            "--db-path", fixture_db,
-            "--wing", "my-test-wing",
-            "--max-sessions", "1",
-            "--dry-run",
             "--output-dir", tmp_output,
-            "--state-file", tmp_state,
+            "--wing", "my-test-wing",
+            "--dry-run",
         ])
         assert result.returncode == 0, (
             f"Expected exit code 0, got {result.returncode}: {result.stderr}"
@@ -172,20 +90,18 @@ class TestSyncWingPassthrough:
         )
 
     def test_given_default_wing_when_sync_dry_run_then_default_wing_in_command(
-        self, fixture_db, tmp_output, tmp_state,
+        self, tmp_output,
     ):
         """
         GIVEN no --wing flag
-        WHEN I run `sync --max-sessions 1 --dry-run`
+        WHEN I run `sync --dry-run`
         THEN the default wing "opencode-sessions" appears in the command output.
         """
+        Path(tmp_output, "session_001.md").write_text("# Session 1")
         result = run_cli([
             "sync",
-            "--db-path", fixture_db,
-            "--max-sessions", "1",
-            "--dry-run",
             "--output-dir", tmp_output,
-            "--state-file", tmp_state,
+            "--dry-run",
         ])
         assert result.returncode == 0, (
             f"Expected exit code 0, got {result.returncode}: {result.stderr}"
@@ -199,20 +115,14 @@ class TestSyncLockDetection:
     """Acceptance criteria: sync fails when mempalace is locked."""
 
     def test_given_mempalace_locked_when_sync_then_returns_lock_error(
-        self, fixture_db, tmp_output, tmp_state,
+        self, tmp_output,
     ):
         """
-        GIVEN sessions to export AND mempalace is locked
-        WHEN I run `sync --mempalace-command <mock-lock>`
+        GIVEN exported files in output dir AND mempalace is locked
+        WHEN I run `sync`
         THEN it should fail with a lock error message.
         """
-        run_cli([
-            "export",
-            "--db-path", fixture_db,
-            "--max-sessions", "2",
-            "--output-dir", tmp_output,
-            "--state-file", tmp_state,
-        ])
+        Path(tmp_output, "session_001.md").write_text("# Session 1")
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
             f.write("#!/bin/sh\necho 'database is locked' >&2\nexit 1\n")
@@ -222,9 +132,7 @@ class TestSyncLockDetection:
         try:
             result = run_cli([
                 "sync",
-                "--db-path", fixture_db,
                 "--output-dir", tmp_output,
-                "--state-file", tmp_state,
                 "--mempalace-command", lock_script,
             ])
         finally:
@@ -238,32 +146,49 @@ class TestSyncLockDetection:
         )
 
 
-class TestSyncExportCount:
-    """Acceptance criteria: sync reports the correct export and mine counts."""
+class TestSyncMineFailure:
+    """Acceptance criteria: sync propagates mine errors."""
 
-    def test_given_sessions_when_sync_dry_run_then_export_count_matches(
-        self, fixture_db, tmp_output, tmp_state,
+    def test_given_mempalace_fails_when_sync_then_returns_error(
+        self, tmp_output,
     ):
         """
-        GIVEN 3 sessions in the database
-        WHEN I run `sync --max-sessions 2 --dry-run`
-        THEN export count is 2
-        AND mining dry-run is shown.
+        GIVEN exported files in output dir
+        WHEN mempalace exits with non-zero
+        THEN sync should exit with non-zero and print an error.
+        """
+        Path(tmp_output, "session_001.md").write_text("# Session 1")
+
+        with mock_mempalace_script(body="#!/bin/sh\nexit 1\n") as mock_cmd:
+            result = run_cli([
+                "sync",
+                "--output-dir", tmp_output,
+                "--mempalace-command", mock_cmd,
+            ])
+        assert result.returncode != 0, (
+            f"Expected non-zero exit code, got 0: stdout={result.stdout}"
+        )
+        assert "Error" in result.stdout, (
+            f"Expected 'Error' in stdout, got: {result.stdout}"
+        )
+
+
+class TestSyncCliRestriction:
+    """Acceptance criteria: sync CLI rejects export-specific flags."""
+
+    def test_given_export_flag_db_path_when_sync_then_rejected(
+        self, tmp_output,
+    ):
+        """
+        GIVEN a --db-path flag (export-specific)
+        WHEN I run `sync --db-path <path>`
+        THEN typer should reject it as an unknown option.
         """
         result = run_cli([
             "sync",
-            "--db-path", fixture_db,
-            "--max-sessions", "2",
-            "--dry-run",
+            "--db-path", "/nonexistent/test.db",
             "--output-dir", tmp_output,
-            "--state-file", tmp_state,
         ])
-        assert result.returncode == 0, (
-            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
-        )
-        assert "Would export 2 sessions" in result.stdout, (
-            f"Expected 'Would export 2 sessions', stdout: {result.stdout}"
-        )
-        assert "Mined 0 drawers" in result.stdout, (
-            f"Expected mine result message, stdout: {result.stdout}"
+        assert result.returncode != 0, (
+            f"Expected non-zero exit code for unknown option, got 0: stdout={result.stdout}"
         )

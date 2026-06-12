@@ -21,7 +21,8 @@ class ConfigLoadService:
                 },
                 "source_dir": ".",
                 "patterns": ["*.log", "*.md"],
-                "state_file": "./target/state.json"
+                "state_file": "./target/state.json",
+                "output_dir": "./target/exports"
             }
         }
         

@@ -62,7 +62,7 @@ mempalace-backfill export [OPTIONS]
 | `--since` | Optional | — | Export sessions after this date (ISO format, e.g. `2026-01-01`) |
 | `--until` | Optional | — | Export sessions before this date (ISO format) |
 | `--exclude-title` | Optional | — | Regex pattern to exclude session titles |
-| `--min-messages` | Optional | `1` | Minimum number of messages a session must have |
+| `--min-messages` | Optional | `5` | Minimum number of messages a session must have |
 | `--output-dir` | Optional | `./target/exports` | Directory to write markdown files |
 | `--state-file` | Optional | `./target/state.json` | Path to state file for incremental exports |
 | `--include-system-prompt` | Optional | `False` | Include system prompt messages in the output |
@@ -70,7 +70,7 @@ mempalace-backfill export [OPTIONS]
 
 #### `sync`
 
-Export sessions AND mine them into MemPalace in one go.
+Mine existing exported sessions into MemPalace. The `export` command must be run separately beforehand.
 
 ```bash
 mempalace-backfill sync [OPTIONS]
@@ -78,19 +78,24 @@ mempalace-backfill sync [OPTIONS]
 
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
+| `--output-dir` | Optional | `./target/exports` | Directory containing exported markdown files |
 | `--wing` | Optional | `opencode-sessions` | MemPalace wing to mine into |
 | `--mempalace-db-path` | Optional | — | Path to MemPalace palace database (maps to `mempalace --palace`) |
 | `--mempalace-command` | Optional | `mempalace` | Override the mempalace command path (useful for testing with mock scripts) |
-| `--db-path` | Optional | `~/.local/share/opencode/opencode.db` | Path to OpenCode SQLite database |
-| `--max-sessions` | Optional | `1000` | Maximum number of sessions to export |
-| `--since` | Optional | — | Export sessions after this date (ISO format) |
-| `--until` | Optional | — | Export sessions before this date (ISO format) |
-| `--exclude-title` | Optional | — | Regex pattern to exclude session titles |
-| `--min-messages` | Optional | `1` | Minimum number of messages a session must have |
-| `--output-dir` | Optional | `./target/exports` | Directory to write markdown files |
-| `--state-file` | Optional | `./target/state.json` | Path to state file for incremental exports |
-| `--include-system-prompt` | Optional | `False` | Include system prompt messages in the output |
-| `--dry-run` | Optional | `False` | Preview export without writing files |
+| `--dry-run` | Optional | `False` | Preview the mempalace command without executing |
+
+#### `clean`
+
+Remove all contents from the session export output directory and reset the export state.
+
+```bash
+mempalace-backfill clean [OPTIONS]
+```
+
+| Option | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `--output-dir` | Optional | `./target/exports` | Directory to clean |
+| `--state-file` | Optional | `./target/state.json` | State file to remove |
 
 #### `test`
 

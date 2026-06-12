@@ -18,6 +18,7 @@ class TestExportDryRun:
             "export",
             "--db-path", fixture_db,
             "--max-sessions", "2",
+            "--min-messages", "1",
             "--dry-run",
             "--output-dir", tmp_output,
             "--state-file", tmp_state
@@ -47,6 +48,7 @@ class TestExportBasic:
             "export",
             "--db-path", fixture_db,
             "--max-sessions", "2",
+            "--min-messages", "1",
             "--output-dir", tmp_output,
             "--state-file", tmp_state
         ])
@@ -80,6 +82,7 @@ class TestExportMaxSessions:
             "export",
             "--db-path", fixture_db,
             "--max-sessions", "5",
+            "--min-messages", "1",
             "--output-dir", tmp_output,
             "--state-file", tmp_state
         ])
@@ -105,6 +108,7 @@ class TestExportStateTracking:
             "export",
             "--db-path", fixture_db,
             "--max-sessions", "2",
+            "--min-messages", "1",
             "--output-dir", tmp_output,
             "--state-file", tmp_state
         ])
@@ -116,6 +120,7 @@ class TestExportStateTracking:
         result2 = run_cli([
             "export",
             "--db-path", fixture_db,
+            "--min-messages", "1",
             "--output-dir", tmp_output,
             "--state-file", tmp_state
         ])
@@ -139,6 +144,7 @@ class TestExportDateFilters:
             "export",
             "--db-path", fixture_db,
             "--since", "2025-06-01",
+            "--min-messages", "1",
             "--output-dir", tmp_output,
             "--state-file", tmp_state
         ])
@@ -158,6 +164,7 @@ class TestExportDateFilters:
             "export",
             "--db-path", fixture_db,
             "--until", "2025-03-01",
+            "--min-messages", "1",
             "--output-dir", tmp_output,
             "--state-file", tmp_state
         ])
@@ -181,6 +188,7 @@ class TestExportExcludeTitle:
             "export",
             "--db-path", fixture_db,
             "--exclude-title", "Session 2",
+            "--min-messages", "1",
             "--output-dir", tmp_output,
             "--state-file", tmp_state
         ])
@@ -229,6 +237,7 @@ class TestExportDateRange:
             "--db-path", fixture_db,
             "--since", "2025-02-01",
             "--until", "2025-08-01",
+            "--min-messages", "1",
             "--output-dir", tmp_output,
             "--state-file", tmp_state,
         ])
@@ -257,6 +266,7 @@ class TestExportExcludeTitleSubstring:
             "export",
             "--db-path", fixture_db,
             "--exclude-title", "1",
+            "--min-messages", "1",
             "--output-dir", tmp_output,
             "--state-file", tmp_state,
         ])
@@ -285,6 +295,7 @@ class TestExportNothingToExport:
             "export",
             "--db-path", fixture_db,
             "--max-sessions", "3",
+            "--min-messages", "1",
             "--output-dir", tmp_output,
             "--state-file", tmp_state,
         ])
@@ -295,6 +306,7 @@ class TestExportNothingToExport:
         result_second = run_cli([
             "export",
             "--db-path", fixture_db,
+            "--min-messages", "1",
             "--output-dir", tmp_output,
             "--state-file", tmp_state,
         ])

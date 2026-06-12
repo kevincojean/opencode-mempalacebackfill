@@ -18,6 +18,7 @@ class BackfillConfig(TypedDict):
     source_dir: str
     patterns: list[str]
     state_file: str
+    output_dir: NotRequired[str]
 
 
 class Config(TypedDict):

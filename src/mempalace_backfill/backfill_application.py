@@ -101,7 +101,7 @@ class BackfillApplication:
         since: str = None,
         until: str = None,
         max_sessions: int = 1000,
-        min_messages: int = 1,
+        min_messages: int = 5,
         exclude_title: str = None,
         output_dir: str = "./target/exports",
         state_file: str = "./target/state.json",
@@ -175,7 +175,7 @@ class BackfillApplication:
                         "beyond this limit. Try a higher --max-sessions value."
                     )
                     logging.warning(msg, max_sessions)
-                    console.print(f"[yellow]{msg}[/yellow]")
+                    console.print(f"[yellow]{msg % max_sessions}[/yellow]")
                 else:
                     logging.info("No new sessions to export")
                     console.print("[yellow]No new sessions to export.[/yellow]")
@@ -212,7 +212,7 @@ class BackfillApplication:
         since: str = None,
         until: str = None,
         max_sessions: int = 1000,
-        min_messages: int = 1,
+        min_messages: int = 5,
         exclude_title: str = None,
         output_dir: str = "./target/exports",
         state_file: str = "./target/state.json",
@@ -231,56 +231,66 @@ class BackfillApplication:
 
     @staticmethod
     def sync(
-        since: str = None,
-        until: str = None,
-        max_sessions: int = 1000,
-        min_messages: int = 1,
-        exclude_title: str = None,
+        output_dir: str = "./target/exports",
+        dry_run: bool = False,
+        wing: str = "opencode-sessions",
+        mempalace_db_path: str | None = None,
+        mempalace_command: str | None = None,
+    ) -> Either[Error, int]:
+        try:
+            inject.clear_and_configure(BackfillApplication._configure_injector)
+            config_svc = inject.instance(ConfigLoadService)
+
+            mempalace_overrides: dict[str, Any] = {}
+            if mempalace_db_path:
+                mempalace_overrides["palace_path"] = mempalace_db_path
+            if mempalace_command:
+                mempalace_overrides["command"] = mempalace_command
+            if mempalace_overrides:
+                config_svc.load_config({"backfill": {"mempalace": mempalace_overrides}})
+
+            launcher = inject.instance(MineLauncherService)
+            logging.info("Starting mempalace mine: wing=%s, dir=%s", wing, output_dir)
+            launch_result = launcher.launch(output_dir, wing, dry_run)
+            if launch_result.is_left():
+                err = launch_result.monoid[0]
+                console.print(f"[red]Mine failed: {err}[/red]")
+                logging.error("Mine failed: %s", err)
+                return Left(err)
+            else:
+                mined = launch_result.value
+                num_str = f"{mined} drawer{'s' if mined != 1 else ''}"
+                console.print(f"[green]Mined {num_str} into wing '{wing}'.[/green]")
+                logging.info("Mine complete: %d drawers into wing '%s'", mined, wing)
+
+            return Right(mined)
+        except Exception as e:
+            logging.error("Sync failed: %s", e)
+            return Left(Error(f"Sync failed: {str(e)}", Just(e)))
+
+    @staticmethod
+    def clean(
         output_dir: str = "./target/exports",
         state_file: str = "./target/state.json",
-        include_system_prompt: bool = False,
-        dry_run: bool = False,
-        db_path: str = None,
-        wing: str = "opencode-sessions",
-        mempalace_db_path: str = None,
-        mempalace_command: str = None,
     ) -> Either[Error, int]:
-        export_result = BackfillApplication._export_sessions(
-            log_prefix="Syncing",
-            since=since, until=until, max_sessions=max_sessions,
-            min_messages=min_messages, exclude_title=exclude_title,
-            output_dir=output_dir, state_file=state_file,
-            include_system_prompt=include_system_prompt,
-            dry_run=dry_run, db_path=db_path,
-        )
+        from mempalace_backfill.clean_service import CleanService
 
-        if export_result.is_left():
-            return export_result
+        state_existed = os.path.exists(state_file)
+        dir_exists = os.path.isdir(output_dir)
 
-        exported_count = export_result.value
-        config_svc = inject.instance(ConfigLoadService)
-        mempalace_overrides: dict[str, Any] = {}
-        if mempalace_db_path:
-            mempalace_overrides["palace_path"] = mempalace_db_path
-        if mempalace_command:
-            mempalace_overrides["command"] = mempalace_command
-        if mempalace_overrides:
-            config_svc.load_config({"backfill": {"mempalace": mempalace_overrides}})
-        launcher = inject.instance(MineLauncherService)
-        logging.info("Export done: %d new sessions. Starting mempalace mine: wing=%s, dir=%s",
-                      exported_count, wing, output_dir)
-        launch_result = launcher.launch(output_dir, wing, dry_run)
-        if launch_result.is_left():
-            err = launch_result.monoid[0]
-            console.print(f"[red]Mine failed: {err}[/red]")
-            logging.error("Mine failed: %s", err)
-            return Left(err)
-        else:
-            mined = launch_result.value
-            console.print(f"[green]Mined {mined} drawers into wing '{wing}'.[/green]")
-            logging.info("Mine complete: %d drawers into wing '%s'", mined, wing)
+        result = CleanService.clean(output_dir, state_file)
 
-        return Right(exported_count)
+        if result.is_right():
+            count = result.value
+            if not dir_exists and not state_existed:
+                console.print("[yellow]Nothing to clean. Output directory and state file do not exist.[/yellow]")
+            else:
+                status = f"output directory ({count} items removed)"
+                if state_existed:
+                    status += ", state file removed"
+                console.print(f"[green]Cleaned: {status}[/green]")
+
+        return result
 
 
 @app.command("export")
@@ -288,7 +298,7 @@ def export_cmd(
     since: str = typer.Option(None, help="Export sessions after this date (ISO format)"),
     until: str = typer.Option(None, help="Export sessions before this date"),
     max_sessions: int = typer.Option(1000, "--max-sessions", help="Maximum sessions to export"),
-    min_messages: int = typer.Option(1, "--min-messages", help="Minimum messages per session"),
+    min_messages: int = typer.Option(5, "--min-messages", help="Minimum messages per session"),
     exclude_title: str = typer.Option(None, "--exclude-title", help="Regex to exclude session titles"),
     output_dir: str = typer.Option("./target/exports", "--output-dir", help="Output directory"),
     state_file: str = typer.Option("./target/state.json", "--state-file", help="State file path"),
@@ -323,36 +333,43 @@ def export_cmd(
 
 @app.command("sync")
 def sync_cmd(
-    since: str = typer.Option(None, help="Export sessions after this date (ISO format)"),
-    until: str = typer.Option(None, help="Export sessions before this date"),
-    max_sessions: int = typer.Option(1000, "--max-sessions", help="Maximum sessions to export"),
-    min_messages: int = typer.Option(1, "--min-messages", help="Minimum messages per session"),
-    exclude_title: str = typer.Option(None, "--exclude-title", help="Regex to exclude session titles"),
-    output_dir: str = typer.Option("./target/exports", "--output-dir", help="Output directory"),
-    state_file: str = typer.Option("./target/state.json", "--state-file", help="State file path"),
-    include_system_prompt: bool = typer.Option(False, "--include-system-prompt", help="Include system prompts"),
+    output_dir: str = typer.Option("./target/exports", "--output-dir", help="Output directory containing exported sessions"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without executing"),
-    db_path: str = typer.Option(None, "--db-path", help="Path to OpenCode SQLite database"),
     wing: str = typer.Option("opencode-sessions", "--wing", help="MemPalace wing to mine into"),
     mempalace_db_path: str = typer.Option(None, "--mempalace-db-path", help="Path to MemPalace palace database (maps to mempalace --palace)"),
     mempalace_command: str = typer.Option(None, "--mempalace-command", help="Override mempalace command path (for testing)"),
 ):
-    """Export sessions and mine them into MemPalace."""
+    """Mine existing exported sessions into MemPalace."""
     BackfillApplication._configure_logging()
     result = BackfillApplication.sync(
-        since=since,
-        until=until,
-        max_sessions=max_sessions,
-        min_messages=min_messages,
-        exclude_title=exclude_title,
         output_dir=output_dir,
-        state_file=state_file,
-        include_system_prompt=include_system_prompt,
         dry_run=dry_run,
-        db_path=db_path,
         wing=wing,
         mempalace_db_path=mempalace_db_path,
         mempalace_command=mempalace_command,
+    )
+    if result.is_left():
+        err = result.monoid[0]
+        if err:
+            msg = f"[red]Error: {err.message}[/red]"
+            if err.exception.is_just():
+                msg += f" (Exception: {err.exception.value})"
+            console.print(msg)
+        else:
+            console.print("[red]Error: Unknown error.[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("clean")
+def clean_cmd(
+    output_dir: str = typer.Option("./target/exports", "--output-dir", help="Output directory to clean"),
+    state_file: str = typer.Option("./target/state.json", "--state-file", help="State file to remove"),
+):
+    """Remove all contents from the output directory and reset the export state."""
+    BackfillApplication._configure_logging()
+    result = BackfillApplication.clean(
+        output_dir=output_dir,
+        state_file=state_file,
     )
     if result.is_left():
         err = result.monoid[0]
