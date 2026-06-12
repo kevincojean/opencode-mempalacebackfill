@@ -21,7 +21,7 @@ class SessionQueryRepository:
             db_path = filters.get("db_path")
             if not db_path:
                 config = self._config_service.load_config()
-                db_path = config["backfill"]["mempalace"]["database_path"]
+                db_path = config["backfill"]["opencode"]["database_path"]
             
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             cursor = conn.cursor()
@@ -55,7 +55,7 @@ class SessionQueryRepository:
             
             query += " ORDER BY time_created DESC"
             
-            limit = filters.get("max_sessions") or filters.get("limit", 100)
+            limit = filters.get("max_sessions") or filters.get("limit", 1000)
             offset = filters.get("offset", 0)
             query += " LIMIT ? OFFSET ?"
             params.extend([limit, offset])

@@ -52,11 +52,17 @@ class MineLauncherService:
         config = self._config_service.load_config()
         
         base_cmd = "mempalace"
+        palace_path: str | None = None
         try:
             mempalace_config = config.get("backfill", {}).get("mempalace", {})
             if isinstance(mempalace_config, dict):
                 base_cmd = mempalace_config.get("command", "mempalace")
+                palace_path = mempalace_config.get("palace_path")
         except (AttributeError, KeyError):
             pass
 
-        return [base_cmd, "mine", "--mode", "convos", "--wing", wing, export_dir]
+        cmd = [base_cmd, "mine", "--mode", "convos", "--wing", wing]
+        if palace_path:
+            cmd.extend(["--palace", palace_path])
+        cmd.append(export_dir)
+        return cmd

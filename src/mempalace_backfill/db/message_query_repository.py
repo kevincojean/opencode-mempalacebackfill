@@ -20,7 +20,7 @@ class MessageQueryRepository:
         try:
             if not db_path:
                 config = self._config_service.load_config()
-                db_path = config["backfill"]["mempalace"]["database_path"]
+                db_path = config["backfill"]["opencode"]["database_path"]
             
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             cursor = conn.cursor()

@@ -1,4 +1,5 @@
 import logging
+import subprocess
 from typing import final, Any
 import inject
 import typer
@@ -37,10 +38,13 @@ class BackfillApplication:
     def _build_overrides(cli_args: dict) -> dict:
         overrides: dict[str, Any] = {}
         backfill_config: dict[str, Any] = {}
+        opencode_config: dict[str, Any] = {}
         mempalace_config: dict[str, Any] = {}
         
         if cli_args.get("db_path"):
-            mempalace_config["database_path"] = cli_args["db_path"]
+            opencode_config["database_path"] = cli_args["db_path"]
+        if cli_args.get("mempalace_db_path"):
+            mempalace_config["palace_path"] = cli_args["mempalace_db_path"]
         if cli_args.get("wing"):
             mempalace_config["wing"] = cli_args["wing"]
         if cli_args.get("state_file"):
@@ -50,6 +54,8 @@ class BackfillApplication:
         if cli_args.get("source_dir"):
             backfill_config["source_dir"] = cli_args["source_dir"]
         
+        if opencode_config:
+            backfill_config["opencode"] = opencode_config
         if mempalace_config:
             backfill_config["mempalace"] = mempalace_config
         if backfill_config:
@@ -70,8 +76,8 @@ class BackfillApplication:
     def export(
         since: str = None,
         until: str = None,
-        max_sessions: int = None,
-        min_messages: int = None,
+        max_sessions: int = 1000,
+        min_messages: int = 1,
         exclude_title: str = None,
         output_dir: str = "./target/exports",
         state_file: str = "./target/state.json",
@@ -144,8 +150,8 @@ class BackfillApplication:
     def sync(
         since: str = None,
         until: str = None,
-        max_sessions: int = None,
-        min_messages: int = None,
+        max_sessions: int = 1000,
+        min_messages: int = 1,
         exclude_title: str = None,
         output_dir: str = "./target/exports",
         state_file: str = "./target/state.json",
@@ -153,6 +159,7 @@ class BackfillApplication:
         dry_run: bool = False,
         db_path: str = None,
         wing: str = "opencode-sessions",
+        mempalace_db_path: str = None,
     ) -> Either[Error, int]:
         export_result = BackfillApplication.export(
             since=since, until=until, max_sessions=max_sessions,
@@ -167,6 +174,9 @@ class BackfillApplication:
         
         exported_count = export_result.value
         if exported_count > 0:
+            if mempalace_db_path:
+                config_svc = inject.instance(ConfigLoadService)
+                config_svc.load_config({"backfill": {"mempalace": {"palace_path": mempalace_db_path}}})
             launcher = inject.instance(MineLauncherService)
             launch_result = launcher.launch(output_dir, wing, dry_run)
             if launch_result.is_left():
@@ -183,8 +193,8 @@ class BackfillApplication:
 def export_cmd(
     since: str = typer.Option(None, help="Export sessions after this date (ISO format)"),
     until: str = typer.Option(None, help="Export sessions before this date"),
-    max_sessions: int = typer.Option(None, "--max-sessions", help="Maximum sessions to export"),
-    min_messages: int = typer.Option(None, "--min-messages", help="Minimum messages per session"),
+    max_sessions: int = typer.Option(1000, "--max-sessions", help="Maximum sessions to export"),
+    min_messages: int = typer.Option(1, "--min-messages", help="Minimum messages per session"),
     exclude_title: str = typer.Option(None, "--exclude-title", help="Regex to exclude session titles"),
     output_dir: str = typer.Option("./target/exports", "--output-dir", help="Output directory"),
     state_file: str = typer.Option("./target/state.json", "--state-file", help="State file path"),
@@ -220,15 +230,16 @@ def export_cmd(
 def sync_cmd(
     since: str = typer.Option(None, help="Export sessions after this date (ISO format)"),
     until: str = typer.Option(None, help="Export sessions before this date"),
-    max_sessions: int = typer.Option(None, "--max-sessions", help="Maximum sessions to export"),
-    min_messages: int = typer.Option(None, "--min-messages", help="Minimum messages per session"),
+    max_sessions: int = typer.Option(1000, "--max-sessions", help="Maximum sessions to export"),
+    min_messages: int = typer.Option(1, "--min-messages", help="Minimum messages per session"),
     exclude_title: str = typer.Option(None, "--exclude-title", help="Regex to exclude session titles"),
     output_dir: str = typer.Option("./target/exports", "--output-dir", help="Output directory"),
     state_file: str = typer.Option("./target/state.json", "--state-file", help="State file path"),
     include_system_prompt: bool = typer.Option(False, "--include-system-prompt", help="Include system prompts"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without executing"),
-    db_path: str = typer.Option(None, "--db-path", help="Override SQLite database path"),
+    db_path: str = typer.Option(None, "--db-path", help="Path to OpenCode SQLite database"),
     wing: str = typer.Option("opencode-sessions", "--wing", help="MemPalace wing to mine into"),
+    mempalace_db_path: str = typer.Option(None, "--mempalace-db-path", help="Path to MemPalace palace database (maps to mempalace --palace)"),
 ):
     """Export sessions and mine them into MemPalace."""
     result = BackfillApplication.sync(
@@ -242,8 +253,34 @@ def sync_cmd(
         include_system_prompt=include_system_prompt,
         dry_run=dry_run,
         db_path=db_path,
-        wing=wing
+        wing=wing,
+        mempalace_db_path=mempalace_db_path,
     )
     if result.is_left():
         console.print(f"[red]Error: {result.monoid[0]}[/red]")
         raise typer.Exit(1)
+
+
+@app.command("test")
+def test_cmd(
+    args: str = typer.Argument(None, help="Extra arguments to pass to pytest"),
+):
+    """Run the test suite (uses uv run pytest in project root)."""
+    cmd = ["uv", "run", "pytest", "-v"]
+    if args:
+        cmd.extend(args.split())
+    result = subprocess.run(cmd)
+    raise typer.Exit(result.returncode)
+
+
+@app.command("reinstall")
+def reinstall_cmd(
+    project_dir: str = typer.Argument(".", help="Path to project root (must contain pyproject.toml)"),
+):
+    """Reinstall the tool from source (uv tool install . --force --reinstall)."""
+    cmd = ["uv", "tool", "install", ".", "--force", "--reinstall"]
+    console.print(f"[cyan]Reinstalling from {project_dir}...[/cyan]")
+    result = subprocess.run(cmd, cwd=project_dir)
+    if result.returncode == 0:
+        console.print("[green]Reinstall complete.[/green]")
+    raise typer.Exit(result.returncode)

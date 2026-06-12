@@ -13,8 +13,10 @@ class ConfigLoadService:
         
         default_config: Config = {
             "backfill": {
+                "opencode": {
+                    "database_path": "~/.local/share/opencode/opencode.db",
+                },
                 "mempalace": {
-                    "database_path": "~/.mempalace/palace.db",
                     "wing": "backfill"
                 },
                 "source_dir": ".",
