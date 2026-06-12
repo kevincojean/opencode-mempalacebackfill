@@ -35,7 +35,15 @@ pip install /home/dehi/src/mempalace_backfill/
 mempalace-backfill --help
 ```
 
-## 3. Execution and Parameters
+## 3. Configuration
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `LOG_LEVEL` | Optional | `INFO` | Python log level. Set to `DEBUG` for verbose output, `WARNING` to suppress info logs, or `ERROR` for errors only. |
+
+## 4. Execution and Parameters
 
 ### Commands
 
@@ -72,6 +80,7 @@ mempalace-backfill sync [OPTIONS]
 |--------|----------|---------|-------------|
 | `--wing` | Optional | `opencode-sessions` | MemPalace wing to mine into |
 | `--mempalace-db-path` | Optional | — | Path to MemPalace palace database (maps to `mempalace --palace`) |
+| `--mempalace-command` | Optional | `mempalace` | Override the mempalace command path (useful for testing with mock scripts) |
 | `--db-path` | Optional | `~/.local/share/opencode/opencode.db` | Path to OpenCode SQLite database |
 | `--max-sessions` | Optional | `1000` | Maximum number of sessions to export |
 | `--since` | Optional | — | Export sessions after this date (ISO format) |
@@ -106,7 +115,7 @@ After pulling changes from the upstream repository, you can install the latest v
 mempalace-backfill reinstall
 ```
 
-## 5. Test Execution
+## 6. Test Execution
 
 Tests use a fixture SQLite database with 3 pre-seeded sessions and temp directories for output and state — no external dependencies or real OpenCode database needed.
 

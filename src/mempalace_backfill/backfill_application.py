@@ -248,13 +248,18 @@ class BackfillApplication:
             if mempalace_overrides:
                 config_svc.load_config({"backfill": {"mempalace": mempalace_overrides}})
             launcher = inject.instance(MineLauncherService)
+            logging.info("Export complete: %d sessions. Mempalace mine starting: wing=%s, dir=%s",
+                          exported_count, wing, output_dir)
             launch_result = launcher.launch(output_dir, wing, dry_run)
             if launch_result.is_left():
                 err = launch_result.monoid[0]
                 console.print(f"[red]Mine failed: {err}[/red]")
+                logging.error("Mine failed: %s", err)
                 return Left(err)
             else:
-                console.print(f"[green]Mined {launch_result.value} drawers into wing '{wing}'.[/green]")
+                mined = launch_result.value
+                console.print(f"[green]Mined {mined} drawers into wing '{wing}'.[/green]")
+                logging.info("Mine complete: %d drawers into wing '%s'", mined, wing)
 
         return Right(exported_count)
 
@@ -331,7 +336,14 @@ def sync_cmd(
         mempalace_command=mempalace_command,
     )
     if result.is_left():
-        console.print(f"[red]Error: {result.monoid[0]}[/red]")
+        err = result.monoid[0]
+        if err:
+            msg = f"[red]Error: {err.message}[/red]"
+            if err.exception.is_just():
+                msg += f" (Exception: {err.exception.value})"
+            console.print(msg)
+        else:
+            console.print("[red]Error: Unknown error.[/red]")
         raise typer.Exit(1)
 
 

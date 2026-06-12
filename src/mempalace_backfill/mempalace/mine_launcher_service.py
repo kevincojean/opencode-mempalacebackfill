@@ -1,3 +1,4 @@
+import logging
 import subprocess
 import re
 from typing import final
@@ -25,8 +26,8 @@ class MineLauncherService:
         self._config_service = config_service
 
     @staticmethod
-    def _check_lock_error(stderr: str) -> bool:
-        return any(p.search(stderr) for p in _LOCK_PATTERNS)
+    def _check_lock_error(output: str) -> bool:
+        return any(p.search(output) for p in _LOCK_PATTERNS)
 
     def launch(self, export_dir: str, wing: str, dry_run: bool = False) -> Either[Error, int]:
         cmd = self._build_command(export_dir, wing)
@@ -36,27 +37,40 @@ class MineLauncherService:
             return Right(0)
 
         try:
-            result = subprocess.run(
+            logging.info("Starting mempalace mine: %s", ' '.join(cmd))
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=120
+                bufsize=1,
             )
-            
-            if result.returncode != 0:
-                stderr = result.stderr.strip()
-                if MineLauncherService._check_lock_error(stderr):
+
+            assert process.stdout is not None
+            output_lines: list[str] = []
+            for line in iter(process.stdout.readline, ''):
+                line = line.rstrip('\n')
+                output_lines.append(line)
+                if line:
+                    logging.info("[mempalace] %s", line)
+            process.stdout.close()
+
+            process.wait(timeout=120)
+            combined_output = '\n'.join(output_lines)
+
+            if process.returncode != 0:
+                if MineLauncherService._check_lock_error(combined_output):
                     return Left(Error(
-                        f"mempalace is locked: {stderr}"
+                        f"mempalace is locked: {combined_output}"
                     ))
                 return Left(Error(
-                    f"mempalace mine failed with exit code {result.returncode}: {stderr}"
+                    f"mempalace mine failed with exit code {process.returncode}: {combined_output}"
                 ))
 
-            match = re.search(r"(\d+)\s+drawers?", result.stdout)
+            match = re.search(r"(\d+)\s+drawers?", combined_output)
             if match:
                 return Right(int(match.group(1)))
-            
+
             return Right(0)
 
         except FileNotFoundError:
