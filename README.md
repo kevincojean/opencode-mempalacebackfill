@@ -146,8 +146,10 @@ uv sync --group test
 ### Run all tests
 
 ```bash
-uv run pytest -v
+mempalace-backfill test
 ```
+
+All arguments after `test` are forwarded to pytest. See the [`test` command](#test) section for more options.
 
 ## License
 
