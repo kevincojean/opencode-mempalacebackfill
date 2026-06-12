@@ -126,7 +126,7 @@ class BackfillApplication:
             state_result = state_repo.load()
             state = state_result.value if state_result.is_right() else None
             if state:
-                logging.info("State loaded: %d sessions already exported", state.total_sessions_exported)
+                logging.debug("State loaded: %d sessions already exported", state.total_sessions_exported)
 
             filters = {}
             if since:
@@ -140,25 +140,45 @@ class BackfillApplication:
             if exclude_title:
                 filters["exclude_title"] = exclude_title
 
-            logging.info("Querying sessions with filters: %s", filters)
+            logging.debug("Querying sessions with filters: %s", filters)
             sessions_result = repo.get_sessions(filters)
             if sessions_result.is_left():
                 return sessions_result
 
             sessions = sessions_result.value
-            logging.info("Fetched %d sessions from database", len(sessions))
+            fetched_count = len(sessions)
+            logging.debug("Fetched %d sessions from database", fetched_count)
 
             if state:
-                before = len(sessions)
+                before = fetched_count
                 sessions = [s for s in sessions if not state.is_exported(s.id)]
                 after = len(sessions)
                 if before != after:
-                    logging.info("After state filtering: %d -> %d sessions (skipped %d already exported)",
-                                 before, after, before - after)
+                    hit_limit = (before == max_sessions)
+                    if after == 0 and hit_limit:
+                        logging.warning(
+                            "After state filtering: %d -> %d sessions (skipped %d already exported). "
+                            "All fetched sessions were already exported AND the query hit LIMIT=%d — "
+                            "there may be older unexported sessions beyond this limit. "
+                            "Try a higher --max-sessions value.",
+                            before, after, before - after, max_sessions,
+                        )
+                    else:
+                        logging.info("After state filtering: %d -> %d sessions (skipped %d already exported)",
+                                     before, after, before - after)
 
             if not sessions:
-                console.print("[yellow]No new sessions to export.[/yellow]")
-                logging.info("No new sessions to export")
+                if state and fetched_count == max_sessions:
+                    msg = (
+                        "No new sessions to export — the SQL query hit LIMIT=%d and all fetched "
+                        "sessions were already exported. Older unexported sessions may exist "
+                        "beyond this limit. Try a higher --max-sessions value."
+                    )
+                    logging.warning(msg, max_sessions)
+                    console.print(f"[yellow]{msg}[/yellow]")
+                else:
+                    logging.info("No new sessions to export")
+                    console.print("[yellow]No new sessions to export.[/yellow]")
                 return Right(0)
 
             if dry_run:

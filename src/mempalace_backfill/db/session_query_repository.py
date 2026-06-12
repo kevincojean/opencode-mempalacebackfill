@@ -61,7 +61,7 @@ class SessionQueryRepository:
             query += " LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             
-            logging.info("Session query: LIMIT=%s, OFFSET=%s, filters=%s", limit, offset, dict(filters))
+            logging.debug("Session query: LIMIT=%s, OFFSET=%s, filters=%s", limit, offset, dict(filters))
             cursor.execute(query, params)
             rows = cursor.fetchall()
             

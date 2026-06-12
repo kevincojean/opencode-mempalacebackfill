@@ -16,6 +16,7 @@ _LOCK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"already running", re.IGNORECASE),
     re.compile(r"resource temporarily unavailable", re.IGNORECASE),
     re.compile(r"timeout", re.IGNORECASE),
+    re.compile(r"is held by", re.IGNORECASE),
 ]
 
 
@@ -38,8 +39,14 @@ class MineLauncherService:
 
         try:
             logging.info("Starting mempalace mine: %s", ' '.join(cmd))
+            # Prepend stdbuf to force line-buffered output from mempalace.
+            # mempalace's shebang uses `-E` which ignores PYTHONUNBUFFERED,
+            # and its print() calls lack flush=True, so piped output is
+            # block-buffered (nothing visible until the process finishes).
+            # stdbuf -oL sets stdout to line-buffered at the C library level.
+            stream_cmd = ["stdbuf", "-oL"] + cmd
             process = subprocess.Popen(
-                cmd,
+                stream_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
