@@ -1,5 +1,7 @@
 import logging
+import os
 import subprocess
+import sys
 from typing import final, Any
 import inject
 import typer
@@ -19,10 +21,31 @@ from mempalace_backfill.mempalace.mine_launcher_service import MineLauncherServi
 
 console = Console()
 app = typer.Typer(add_completion=False)
-logger = logging.getLogger(__name__)
 
 @final
 class BackfillApplication:
+    @staticmethod
+    def _configure_logging() -> None:
+        root = logging.getLogger()
+        log_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
+        log_level = getattr(logging, log_level_str, logging.INFO)
+        root.setLevel(log_level)
+
+        if not root.handlers:
+            fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+            stdout_handler = logging.StreamHandler(sys.stdout)
+            stdout_handler.setLevel(log_level)
+            stdout_handler.addFilter(lambda record: record.levelno < logging.ERROR)
+            stdout_handler.setFormatter(fmt)
+
+            stderr_handler = logging.StreamHandler(sys.stderr)
+            stderr_handler.setLevel(logging.ERROR)
+            stderr_handler.setFormatter(fmt)
+
+            root.addHandler(stdout_handler)
+            root.addHandler(stderr_handler)
+
     @staticmethod
     def _configure_injector(binder: inject.Binder) -> None:
         config_svc = ConfigLoadService()
@@ -86,6 +109,9 @@ class BackfillApplication:
         db_path: str = None,
     ) -> Either[Error, int]:
         try:
+            logging.info("Exporting sessions: max_sessions=%s, since=%s, until=%s, exclude_title=%s, min_messages=%s, output_dir=%s",
+                         max_sessions, since, until, exclude_title, min_messages, output_dir)
+
             inject.clear_and_configure(BackfillApplication._configure_injector)
             
             config_svc = inject.instance(ConfigLoadService)
@@ -98,6 +124,8 @@ class BackfillApplication:
             
             state_result = state_repo.load()
             state = state_result.value if state_result.is_right() else None
+            if state:
+                logging.info("State loaded: %d sessions already exported", state.total_sessions_exported)
             
             filters = {}
             if since:
@@ -111,23 +139,33 @@ class BackfillApplication:
             if exclude_title:
                 filters["exclude_title"] = exclude_title
             
+            logging.info("Querying sessions with filters: %s", filters)
             sessions_result = repo.get_sessions(filters)
             if sessions_result.is_left():
                 return sessions_result
             
             sessions = sessions_result.value
+            logging.info("Fetched %d sessions from database", len(sessions))
             
             if state:
+                before = len(sessions)
                 sessions = [s for s in sessions if not state.is_exported(s.id)]
+                after = len(sessions)
+                if before != after:
+                    logging.info("After state filtering: %d -> %d sessions (skipped %d already exported)",
+                                 before, after, before - after)
             
             if not sessions:
                 console.print("[yellow]No new sessions to export.[/yellow]")
+                logging.info("No new sessions to export")
                 return Right(0)
             
             if dry_run:
                 console.print(f"[cyan][DRY-RUN] Would export {len(sessions)} sessions to {output_dir}[/cyan]")
+                logging.info("DRY-RUN: Would export %d sessions to %s", len(sessions), output_dir)
                 return Right(len(sessions))
             
+            logging.info("Exporting %d sessions to %s", len(sessions), output_dir)
             result = svc.export_all(sessions, output_dir, include_system_prompt)
             if result.is_left():
                 return result
@@ -138,12 +176,14 @@ class BackfillApplication:
                     state = state.mark_exported(s_id)
                 save_result = state_repo.save(state)
                 if save_result.is_left():
-                    logger.warning("State file save failed (non-critical): %s", save_result.value)
+                    logging.warning("State file save failed (non-critical): %s", save_result.value)
             
             count = len(exported_ids)
             console.print(f"[green]Successfully exported {count} sessions.[/green]")
+            logging.info("Successfully exported %d sessions to %s", count, output_dir)
             return Right(count)
         except Exception as e:
+            logging.error("Export failed: %s", e)
             return Left(Error(f"Export failed: {str(e)}", Just(e)))
 
     @staticmethod
@@ -203,6 +243,7 @@ def export_cmd(
     db_path: str = typer.Option(None, "--db-path", help="Override SQLite database path"),
 ):
     """Export sessions to markdown files."""
+    BackfillApplication._configure_logging()
     result = BackfillApplication.export(
         since=since,
         until=until,
@@ -242,6 +283,7 @@ def sync_cmd(
     mempalace_db_path: str = typer.Option(None, "--mempalace-db-path", help="Path to MemPalace palace database (maps to mempalace --palace)"),
 ):
     """Export sessions and mine them into MemPalace."""
+    BackfillApplication._configure_logging()
     result = BackfillApplication.sync(
         since=since,
         until=until,

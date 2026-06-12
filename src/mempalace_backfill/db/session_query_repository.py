@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from datetime import datetime
 from typing import final
@@ -60,6 +61,7 @@ class SessionQueryRepository:
             query += " LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             
+            logging.info("Session query: LIMIT=%s, OFFSET=%s, filters=%s", limit, offset, dict(filters))
             cursor.execute(query, params)
             rows = cursor.fetchall()
             

@@ -1,3 +1,4 @@
+import logging
 import os
 import tempfile
 import re
@@ -76,6 +77,7 @@ class MarkdownConversionService:
 
     def export_all(self, sessions: list[Session], output_dir: str, include_system: bool = False) -> Either[Error, list[str]]:
         try:
+            logging.info("Exporting %d sessions to %s (include_system=%s)", len(sessions), output_dir, include_system)
             exported_ids = []
             for session in sessions:
                 messages_either = self._message_repo.get_messages(session.id, include_system=True)
