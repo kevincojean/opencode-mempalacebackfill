@@ -82,6 +82,22 @@ mempalace-backfill sync [OPTIONS]
 | `--include-system-prompt` | Optional | `False` | Include system prompt messages in the output |
 | `--dry-run` | Optional | `False` | Preview export without writing files |
 
+## 4. Test Execution
+
+Tests use a fixture SQLite database with 3 pre-seeded sessions and temp directories for output and state — no external dependencies or real OpenCode database needed.
+
+### Prerequisites
+
+```bash
+uv sync --group test
+```
+
+### Run all tests
+
+```bash
+uv run pytest -v
+```
+
 ## License
 
 MIT
