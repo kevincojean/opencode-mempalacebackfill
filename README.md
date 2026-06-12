@@ -79,6 +79,7 @@ mempalace-backfill sync [OPTIONS]
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
 | `--output-dir` | Optional | `./target/exports` | Directory containing exported markdown files |
+| `--max-sessions` | Optional | — | Maximum number of session files to mine (copies first N into a temp dir) |
 | `--wing` | Optional | `opencode-sessions` | MemPalace wing to mine into |
 | `--mempalace-db-path` | Optional | — | Path to MemPalace palace database (maps to `mempalace --palace`) |
 | `--mempalace-command` | Optional | `mempalace` | Override the mempalace command path (useful for testing with mock scripts) |

@@ -192,3 +192,115 @@ class TestSyncCliRestriction:
         assert result.returncode != 0, (
             f"Expected non-zero exit code for unknown option, got 0: stdout={result.stdout}"
         )
+
+
+class TestSyncMaxSessions:
+    """Acceptance criteria: --max-sessions creates temp dir with subset of files."""
+
+    def test_given_max_sessions_when_sync_dry_run_then_command_refers_to_temp_dir(
+        self, tmp_output,
+    ):
+        """
+        GIVEN 5 markdown files in the output directory
+        WHEN I run `sync --max-sessions 2 --dry-run`
+        THEN the dry-run command output contains a .tmp_sync_ path
+        AND the temp directory is cleaned up afterwards.
+        """
+        for i in range(5):
+            Path(tmp_output, f"session_{i:03d}.md").write_text(f"# Session {i}")
+
+        result = run_cli([
+            "sync",
+            "--output-dir", tmp_output,
+            "--max-sessions", "2",
+            "--dry-run",
+        ])
+        assert result.returncode == 0, (
+            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
+        )
+        assert ".tmp_sync_" in result.stdout, (
+            f"Expected .tmp_sync_ path in dry-run command, stdout: {result.stdout}"
+        )
+
+        leftover = [d for d in Path(tmp_output).iterdir() if d.name.startswith(".tmp_sync_")]
+        assert len(leftover) == 0, (
+            f"Temp dir not cleaned up after sync: {leftover}"
+        )
+
+    def test_given_max_sessions_when_sync_then_cleans_up_temp_dir(
+        self, tmp_output,
+    ):
+        """
+        GIVEN 5 markdown files in the output directory
+        WHEN I run `sync --max-sessions 3` with a mock mempalace
+        THEN the temp directory is removed after completion.
+        """
+        for i in range(5):
+            Path(tmp_output, f"session_{i:03d}.md").write_text(f"# Session {i}")
+
+        with mock_mempalace_script() as mock_cmd:
+            result = run_cli([
+                "sync",
+                "--output-dir", tmp_output,
+                "--max-sessions", "3",
+                "--mempalace-command", mock_cmd,
+            ])
+        assert result.returncode == 0, (
+            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
+        )
+
+        leftover = [d for d in Path(tmp_output).iterdir() if d.name.startswith(".tmp_sync_")]
+        assert len(leftover) == 0, (
+            f"Temp dir not cleaned up after sync: {leftover}"
+        )
+        # Original files must still be intact
+        md_files = sorted(Path(tmp_output).glob("*.md"))
+        assert len(md_files) == 5, (
+            f"Expected 5 original files intact, found {len(md_files)}"
+        )
+
+    def test_given_max_sessions_greater_than_files_when_sync_then_succeeds(
+        self, tmp_output,
+    ):
+        """
+        GIVEN 3 markdown files in the output directory
+        WHEN I run `sync --max-sessions 10`
+        THEN all 3 files are copied and sync succeeds.
+        """
+        for i in range(3):
+            Path(tmp_output, f"session_{i:03d}.md").write_text(f"# Session {i}")
+
+        with mock_mempalace_script() as mock_cmd:
+            result = run_cli([
+                "sync",
+                "--output-dir", tmp_output,
+                "--max-sessions", "10",
+                "--mempalace-command", mock_cmd,
+            ])
+        assert result.returncode == 0, (
+            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
+        )
+        leftover = [d for d in Path(tmp_output).iterdir() if d.name.startswith(".tmp_sync_")]
+        assert len(leftover) == 0, "Temp dir not cleaned up"
+
+    def test_given_no_max_sessions_when_sync_dry_run_then_mines_directly(
+        self, tmp_output,
+    ):
+        """
+        GIVEN exported files in output dir
+        WHEN I run `sync --dry-run` without --max-sessions
+        THEN the command references the output dir directly (no .tmp_sync_).
+        """
+        Path(tmp_output, "session_001.md").write_text("# Session 1")
+
+        result = run_cli([
+            "sync",
+            "--output-dir", tmp_output,
+            "--dry-run",
+        ])
+        assert result.returncode == 0, (
+            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
+        )
+        assert ".tmp_sync_" not in result.stdout, (
+            f"Expected no temp dir path without --max-sessions, stdout: {result.stdout}"
+        )

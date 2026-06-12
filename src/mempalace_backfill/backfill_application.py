@@ -2,10 +2,13 @@ import logging
 import os
 import subprocess
 import sys
-from typing import final, Any
+from typing import final, Any, Iterator
 import inject
 import typer
-from datetime import datetime
+import shutil
+from contextlib import contextmanager
+from pathlib import Path
+from datetime import datetime, timedelta
 from rich.console import Console
 from pymonad.either import Either, Left, Right
 from pymonad.maybe import Just
@@ -21,6 +24,34 @@ from mempalace_backfill.mempalace.mine_launcher_service import MineLauncherServi
 
 console = Console()
 app = typer.Typer(add_completion=False)
+
+
+@contextmanager
+def _managed_mine_source(output_dir: str, max_sessions: int | None) -> Iterator[str]:
+    """Yield a directory to mine from, creating a temp subset when max_sessions is set.
+
+    When max_sessions is specified, copies the first N markdown files from the
+    output directory into a temporary subdirectory inside the output directory.
+    The temp directory is cleaned up on completion, error, or interrupt via the
+    context manager's finally block.
+    """
+    if max_sessions is None:
+        yield output_dir
+        return
+
+    tmp_dir = Path(output_dir) / f".tmp_sync_{os.urandom(4).hex()}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        md_files = sorted(Path(output_dir).glob("*.md"))
+        for f in md_files[:max_sessions]:
+            shutil.copy2(str(f), str(tmp_dir / f.name))
+        logging.debug("Temp mine dir %s: copied %d/%d markdown files",
+                      tmp_dir, min(max_sessions, len(md_files)), len(md_files))
+        yield str(tmp_dir)
+    finally:
+        if tmp_dir.exists():
+            shutil.rmtree(str(tmp_dir))
+
 
 @final
 class BackfillApplication:
@@ -110,6 +141,10 @@ class BackfillApplication:
         db_path: str = None,
     ) -> Either[Error, int]:
         try:
+            if since is None and until is None:
+                since = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+                logging.debug("No --since/--until provided, defaulting --since to 3 months ago: %s", since)
+
             logging.info("%s sessions: max_sessions=%s, since=%s, until=%s, exclude_title=%s, min_messages=%s, output_dir=%s",
                          log_prefix, max_sessions, since, until, exclude_title, min_messages, output_dir)
 
@@ -236,6 +271,7 @@ class BackfillApplication:
         wing: str = "opencode-sessions",
         mempalace_db_path: str | None = None,
         mempalace_command: str | None = None,
+        max_sessions: int | None = None,
     ) -> Either[Error, int]:
         try:
             inject.clear_and_configure(BackfillApplication._configure_injector)
@@ -250,18 +286,19 @@ class BackfillApplication:
                 config_svc.load_config({"backfill": {"mempalace": mempalace_overrides}})
 
             launcher = inject.instance(MineLauncherService)
-            logging.info("Starting mempalace mine: wing=%s, dir=%s", wing, output_dir)
-            launch_result = launcher.launch(output_dir, wing, dry_run)
-            if launch_result.is_left():
-                err = launch_result.monoid[0]
-                console.print(f"[red]Mine failed: {err}[/red]")
-                logging.error("Mine failed: %s", err)
-                return Left(err)
-            else:
-                mined = launch_result.value
-                num_str = f"{mined} drawer{'s' if mined != 1 else ''}"
-                console.print(f"[green]Mined {num_str} into wing '{wing}'.[/green]")
-                logging.info("Mine complete: %d drawers into wing '%s'", mined, wing)
+            with _managed_mine_source(output_dir, max_sessions) as source_dir:
+                logging.info("Starting mempalace mine: wing=%s, dir=%s", wing, source_dir)
+                launch_result = launcher.launch(source_dir, wing, dry_run)
+                if launch_result.is_left():
+                    err = launch_result.monoid[0]
+                    console.print(f"[red]Mine failed: {err}[/red]")
+                    logging.error("Mine failed: %s", err)
+                    return Left(err)
+                else:
+                    mined = launch_result.value
+                    num_str = f"{mined} drawer{'s' if mined != 1 else ''}"
+                    console.print(f"[green]Mined {num_str} into wing '{wing}'.[/green]")
+                    logging.info("Mine complete: %d drawers into wing '%s'", mined, wing)
 
             return Right(mined)
         except Exception as e:
@@ -295,7 +332,7 @@ class BackfillApplication:
 
 @app.command("export")
 def export_cmd(
-    since: str = typer.Option(None, help="Export sessions after this date (ISO format)"),
+    since: str = typer.Option(None, help="Export sessions after this date (ISO format, defaults to 3 months ago)"),
     until: str = typer.Option(None, help="Export sessions before this date"),
     max_sessions: int = typer.Option(1000, "--max-sessions", help="Maximum sessions to export"),
     min_messages: int = typer.Option(5, "--min-messages", help="Minimum messages per session"),
@@ -336,6 +373,7 @@ def sync_cmd(
     output_dir: str = typer.Option("./target/exports", "--output-dir", help="Output directory containing exported sessions"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without executing"),
     wing: str = typer.Option("opencode-sessions", "--wing", help="MemPalace wing to mine into"),
+    max_sessions: int | None = typer.Option(None, "--max-sessions", help="Maximum number of session files to mine (copies first N into a temp dir)"),
     mempalace_db_path: str = typer.Option(None, "--mempalace-db-path", help="Path to MemPalace palace database (maps to mempalace --palace)"),
     mempalace_command: str = typer.Option(None, "--mempalace-command", help="Override mempalace command path (for testing)"),
 ):
@@ -345,6 +383,7 @@ def sync_cmd(
         output_dir=output_dir,
         dry_run=dry_run,
         wing=wing,
+        max_sessions=max_sessions,
         mempalace_db_path=mempalace_db_path,
         mempalace_command=mempalace_command,
     )

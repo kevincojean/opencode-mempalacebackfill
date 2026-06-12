@@ -17,6 +17,7 @@ class TestExportDryRun:
         result = run_cli([
             "export",
             "--db-path", fixture_db,
+            "--since", "2025-01-01",
             "--max-sessions", "2",
             "--min-messages", "1",
             "--dry-run",
@@ -47,6 +48,7 @@ class TestExportBasic:
         result = run_cli([
             "export",
             "--db-path", fixture_db,
+            "--since", "2025-01-01",
             "--max-sessions", "2",
             "--min-messages", "1",
             "--output-dir", tmp_output,
@@ -81,6 +83,7 @@ class TestExportMaxSessions:
         result = run_cli([
             "export",
             "--db-path", fixture_db,
+            "--since", "2025-01-01",
             "--max-sessions", "5",
             "--min-messages", "1",
             "--output-dir", tmp_output,
@@ -107,6 +110,7 @@ class TestExportStateTracking:
         result1 = run_cli([
             "export",
             "--db-path", fixture_db,
+            "--since", "2025-01-01",
             "--max-sessions", "2",
             "--min-messages", "1",
             "--output-dir", tmp_output,
@@ -120,6 +124,7 @@ class TestExportStateTracking:
         result2 = run_cli([
             "export",
             "--db-path", fixture_db,
+            "--since", "2025-01-01",
             "--min-messages", "1",
             "--output-dir", tmp_output,
             "--state-file", tmp_state
@@ -187,6 +192,7 @@ class TestExportExcludeTitle:
         result = run_cli([
             "export",
             "--db-path", fixture_db,
+            "--since", "2025-01-01",
             "--exclude-title", "Session 2",
             "--min-messages", "1",
             "--output-dir", tmp_output,
@@ -265,6 +271,7 @@ class TestExportExcludeTitleSubstring:
         result = run_cli([
             "export",
             "--db-path", fixture_db,
+            "--since", "2025-01-01",
             "--exclude-title", "1",
             "--min-messages", "1",
             "--output-dir", tmp_output,
@@ -294,6 +301,7 @@ class TestExportNothingToExport:
         result_first = run_cli([
             "export",
             "--db-path", fixture_db,
+            "--since", "2025-01-01",
             "--max-sessions", "3",
             "--min-messages", "1",
             "--output-dir", tmp_output,
