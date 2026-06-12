@@ -21,25 +21,31 @@ If you use OpenCode with MemPalace you want to also have MemPalace ingest your p
 ### Install via `uv` (recommended)
 
 ```bash
-git clone https://github.com/ohmyopenode/mempalace-backfill.git
+git clone https://github.com/kevincojean/opencode-mempalacebackfill.git
 cd mempalace-backfill
 uv tool install .
 ```
 
 This makes the `mempalace-backfill` command available globally.
 
-### Install via `pip`
+<details>
+<summary>Install via <code>pip</code></summary>
 
 ```bash
 cd mempalace-backfill
 pip install .
 ```
 
-### Verify installation
+</details>
+
+<details>
+<summary>Verify installation</summary>
 
 ```bash
 mempalace-backfill --help
 ```
+
+</details>
 
 ## 3. Configuration
 
