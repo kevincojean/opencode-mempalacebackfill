@@ -4,7 +4,7 @@ Ingest all your previous OpenCode sessions into MemPalace.
 
 **Supported platforms**: Linux. Windows may work but is untested.
 
-**Disclaimer**: This software is offered for free with no guaranteed support. Versions tagged with `SNAPSHOT` are considered unstable and should not be used in production.
+**Disclaimer**: This software is offered for free with no guaranteed support. Versions tagged with `rc (release candidate)` are considered unstable and should not be used in production.
 
 ## 1. Why This Project
 
