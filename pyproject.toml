@@ -1,0 +1,28 @@
+[project]
+name = "mempalace-backfill"
+version = "0.1.0"
+description = "Backfill historical OpenCode sessions into MemPalace"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.9.0",
+    "inject>=4.3.0",
+    "pymonad>=2.4.0",
+    "rich>=13.0.0",
+    "typing-extensions>=4.0.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0.0"]
+
+[dependency-groups]
+test = ["pytest>=8.0.0"]
+
+[project.scripts]
+mempalace-backfill = "mempalace_backfill.backfill_application:app"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
