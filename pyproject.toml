@@ -12,10 +12,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8.0.0"]
+test = ["pytest>=8.0.0", "pytest-xdist>=3.6.0"]
 
 [dependency-groups]
-test = ["pytest>=8.0.0"]
+test = ["pytest>=8.0.0", "pytest-xdist>=3.6.0"]
 
 [project.scripts]
 mempalace-backfill = "mempalace_backfill.backfill_application:app"

@@ -435,7 +435,7 @@ def test_cmd(
     args: str = typer.Argument(None, help="Extra arguments to pass to pytest"),
 ):
     """Run the test suite (uses uv run pytest in project root)."""
-    cmd = ["uv", "run", "pytest", "-v"]
+    cmd = ["uv", "run", "pytest", "-v", "-n", "auto"]
     if args:
         cmd.extend(args.split())
     result = subprocess.run(cmd)
