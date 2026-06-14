@@ -305,18 +305,34 @@ class TestSyncMaxSessions:
         THEN the command references the output dir directly (no .tmp_sync_).
         """
         Path(tmp_output, "session_001.md").write_text("# Session 1")
+        
+        import json
+        config_dir = Path.home() / ".config" / "com.kevincojean.opencode-mempalacebackfill"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "config.json"
+        config_file.write_text(json.dumps({
+            "backfill": {
+                "preclassification": {
+                    "enabled": False
+                }
+            }
+        }))
 
-        result = run_cli([
-            "sync",
-            "--output-dir", tmp_output,
-            "--dry-run",
-        ])
-        assert result.returncode == 0, (
-            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
-        )
-        assert ".tmp_sync_" not in result.stdout, (
-            f"Expected no temp dir path without --max-sessions, stdout: {result.stdout}"
-        )
+        try:
+            result = run_cli([
+                "sync",
+                "--output-dir", tmp_output,
+                "--dry-run",
+            ])
+            assert result.returncode == 0, (
+                f"Expected exit code 0, got {result.returncode}: {result.stderr}"
+            )
+            assert ".tmp_sync_" not in result.stdout, (
+                f"Expected no temp dir path without --max-sessions and preclassification disabled, stdout: {result.stdout}"
+            )
+        finally:
+            if config_file.exists():
+                config_file.unlink()
 
 
 class TestSyncDefaultPaths:

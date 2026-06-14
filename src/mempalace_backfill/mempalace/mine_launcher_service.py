@@ -39,8 +39,8 @@ class MineLauncherService:
     def _check_lock_error(output: str) -> bool:
         return any(p.search(output) for p in _LOCK_PATTERNS)
 
-    def launch(self, export_dir: str, wing: str, dry_run: bool = False) -> Either[Error, int]:
-        cmd = self._build_command(export_dir, wing)
+    def launch(self, export_dir: str, wing: str, dry_run: bool = False, extract_general: bool = False) -> Either[Error, int]:
+        cmd = self._build_command(export_dir, wing, extract_general)
         
         if dry_run:
             print(f"[DRY-RUN] Command: {' '.join(cmd)}")
@@ -143,7 +143,7 @@ class MineLauncherService:
         except Exception as e:
             return Left(Error(f"Unexpected error during mempalace mine: {str(e)}", Just(e)))
 
-    def _build_command(self, export_dir: str, wing: str) -> list[str]:
+    def _build_command(self, export_dir: str, wing: str, extract_general: bool = False) -> list[str]:
         config = self._config_service.load_config()
         
         base_cmd = "mempalace"
@@ -157,6 +157,8 @@ class MineLauncherService:
             pass
 
         cmd = [base_cmd, "mine", "--mode", "convos", "--wing", wing]
+        if extract_general:
+            cmd.extend(["--extract", "general"])
         if palace_path:
             cmd.extend(["--palace", palace_path])
         cmd.append(export_dir)

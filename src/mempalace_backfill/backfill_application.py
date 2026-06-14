@@ -21,26 +21,129 @@ from mempalace_backfill.export.content_normalization_service import ContentNorma
 from mempalace_backfill.export.markdown_conversion_service import MarkdownConversionService
 from mempalace_backfill.state.state_file_repository import StateFileRepository
 from mempalace_backfill.mempalace.mine_launcher_service import MineLauncherService
+from mempalace_backfill.classify.classify_pipeline import ClassifyPipeline
+from mempalace_backfill.classify.regex_classifier import RegexClassifier
 
 _XDG_DATA_HOME = Path.home() / ".local" / "share" / "com.kevincojean.opencode-mempalacebackfill"
 _DEFAULT_EXPORT_DIR = str(_XDG_DATA_HOME / "exports")
 _DEFAULT_STATE_FILE = str(_XDG_DATA_HOME / "state.json")
+_DEFAULT_PALACE_DIR = str(Path.home() / ".mempalace" / "palace")
 
 console = Console()
+
+
+def _resolve_palace_path(config: dict, cli_palace_path: str | None) -> str:
+    """Resolve the MemPalace palace database path."""
+    if cli_palace_path:
+        return cli_palace_path
+    try:
+        return (
+            config.get("backfill", {})
+            .get("mempalace", {})
+            .get("palace_path", _DEFAULT_PALACE_DIR)
+        )
+    except Exception:
+        return _DEFAULT_PALACE_DIR
+
+
+def _delete_palace_drawers(
+    palace_path: str,
+    source_files: set[str],
+    extract_mode: str | None = "exchange",
+) -> Either[Error, int]:
+    """Delete drawers for given source files from the palace ChromaDB.
+
+    Uses ChromaDB directly to remove stale drawers before re-mining,
+    so only files whose content changed get re-processed.
+
+    Args:
+        palace_path: Path to the MemPalace palace directory.
+        source_files: Set of source file paths whose drawers to delete.
+        extract_mode: Delete only drawers with this extract_mode
+            (default ``"exchange"``). Set ``None`` to delete all modes.
+
+    Returns:
+        Right with count of deleted drawers, or Left on error.
+    """
+    if not source_files:
+        return Right(0)
+
+    try:
+        import chromadb
+        from chromadb.config import Settings as ChromaSettings
+    except ImportError:
+        logging.warning(
+            "chromadb not available — cannot delete stale palace drawers. "
+            "Install chromadb or run sync without preclassification."
+        )
+        return Left(Error("chromadb not available"))
+
+    try:
+        db_path = Path(palace_path)
+        if not db_path.is_dir():
+            logging.warning("Palace directory not found: %s", palace_path)
+            return Right(0)
+
+        client = chromadb.PersistentClient(
+            path=str(db_path),
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+        try:
+            collection = client.get_collection("mempalace_drawers")
+        except ValueError:
+            logging.info("Collection 'mempalace_drawers' does not exist yet — nothing to delete")
+            return Right(0)
+
+        total_deleted = 0
+        for src in sorted(source_files):
+            try:
+                # ChromaDB 1.5.8 requires $and/$or syntax when the where
+                # clause has more than one condition — a flat dict with
+                # multiple keys raises "Expected where to have exactly
+                # one operator".
+                if extract_mode is not None:
+                    where: dict = {
+                        "$and": [
+                            {"source_file": src},
+                            {"extract_mode": extract_mode},
+                        ]
+                    }
+                else:
+                    where = {"source_file": src}
+
+                result = collection.get(where=where, include=[])
+                ids = result.get("ids", [])
+                if ids:
+                    collection.delete(ids=ids)
+                    total_deleted += len(ids)
+                    logging.debug("Deleted %d drawers for %s", len(ids), src)
+            except Exception as e:
+                logging.warning("Failed to delete drawers for %s: %s", src, e)
+
+        if total_deleted:
+            logging.info("Deleted %d stale drawer(s) from %d file(s)", total_deleted, len(source_files))
+        return Right(total_deleted)
+
+    except Exception as e:
+        msg = f"Failed to access palace ChromaDB at {palace_path}: {e}"
+        logging.error(msg)
+        return Left(Error(msg))
 app = typer.Typer(add_completion=False)
 
 
 @contextmanager
-def _managed_mine_source(output_dir: str, max_sessions: int | None) -> Iterator[str]:
-    """Yield a directory to mine from, creating a temp subset when max_sessions is set.
+def _managed_mine_source(output_dir: str, max_sessions: int | None, force_temp: bool = False) -> Iterator[str]:
+    """Yield a directory to mine from, creating a temp subset when max_sessions is set
+    or force_temp is True.
 
-    When max_sessions is specified, copies the first N markdown files from the
+    When max_sessions is specified or force_temp is True, copies the markdown files from the
     output directory (including any wing subdirectory structure) into a temporary
     subdirectory inside the output directory, preserving relative paths.
+    If max_sessions is set, only the first N files are copied.
     The temp directory is cleaned up on completion, error, or interrupt via the
     context manager's finally block.
     """
-    if max_sessions is None:
+    if max_sessions is None and not force_temp:
         yield output_dir
         return
 
@@ -50,15 +153,16 @@ def _managed_mine_source(output_dir: str, max_sessions: int | None) -> Iterator[
         md_files = sorted(Path(output_dir).rglob("*.md"))
         copied = 0
         for f in md_files:
-            if copied >= max_sessions:
+            if max_sessions is not None and copied >= max_sessions:
                 break
             rel = f.relative_to(output_dir)
             dest = tmp_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(f), str(dest))
             copied += 1
-        logging.debug("Temp mine dir %s: copied %d/%d markdown files",
-                      tmp_dir, min(max_sessions, len(md_files)), len(md_files))
+        
+        limit_info = f"{copied}/{len(md_files)}" if max_sessions else f"{copied}"
+        logging.debug("Temp mine dir %s: copied %s markdown files", tmp_dir, limit_info)
         yield str(tmp_dir)
     finally:
         if tmp_dir.exists():
@@ -99,6 +203,15 @@ class BackfillApplication:
         binder.bind_to_constructor(MarkdownConversionService, MarkdownConversionService)
         binder.bind_to_constructor(StateFileRepository, StateFileRepository)
         binder.bind_to_constructor(MineLauncherService, MineLauncherService)
+
+        # Classification
+        def configure_regex(config_svc_inst: ConfigLoadService):
+            config = config_svc_inst.load_config()
+            custom = config["backfill"]["preclassification"].get("custom_patterns", {})
+            return RegexClassifier(custom_patterns=custom)
+
+        binder.bind_to_provider(RegexClassifier, lambda: configure_regex(inject.instance(ConfigLoadService)))
+        binder.bind_to_constructor(ClassifyPipeline, ClassifyPipeline)
 
     @staticmethod
     def _build_overrides(cli_args: dict) -> dict:
@@ -296,10 +409,16 @@ class BackfillApplication:
                 mempalace_overrides["palace_path"] = mempalace_db_path
             if mempalace_command:
                 mempalace_overrides["command"] = mempalace_command
-            if mempalace_overrides:
-                config_svc.load_config({"backfill": {"mempalace": mempalace_overrides}})
 
+            overrides: dict[str, Any] = {}
+            if mempalace_overrides:
+                overrides.setdefault("backfill", {})["mempalace"] = mempalace_overrides
+            config = config_svc.load_config(overrides)
+            pre_config = config["backfill"].get("preclassification", {})
+            preclass_enabled = pre_config.get("enabled", False)
+            palace_path = _resolve_palace_path(config, mempalace_db_path)
             launcher = inject.instance(MineLauncherService)
+            classifier = inject.instance(ClassifyPipeline)
 
             if wing:
                 wing_dirs: dict[str, str] = {wing: output_dir}
@@ -310,9 +429,67 @@ class BackfillApplication:
 
             total_mined = 0
             for w, source in wing_dirs.items():
-                with _managed_mine_source(source, max_sessions) as source_dir:
+                modified_files: set[str] = set()
+
+                # ── Step 1: Classify original files in-place ──────────────
+                if preclass_enabled and not dry_run:
+                    md_files = sorted(
+                        p for p in Path(source).rglob("*.md")
+                        if ".tmp_sync_" not in p.parts
+                    )
+                    logging.info(
+                        "Pre-classifying %d sessions in wing '%s' (in-place)",
+                        len(md_files), w,
+                    )
+                    for f in md_files:
+                        classify_result = classifier.classify_file(str(f))
+                        if classify_result.is_right():
+                            segments = classify_result.value
+                            if segments:
+                                apply_result = classifier.apply_markers(str(f), segments)
+                                if apply_result.is_right() and apply_result.value:
+                                    modified_files.add(str(f))
+
+                    if modified_files:
+                        logging.info(
+                            "  → %d file(s) got new markers",
+                            len(modified_files),
+                        )
+
+                # ── Step 2: Delete stale palace drawers for modified files ──
+                # Only delete when NOT using a temp dir for mining (temp dirs
+                # create different source_file paths that don't match the
+                # original paths stored in the palace).
+                if modified_files and not dry_run and max_sessions is None:
+                    logging.info(
+                        "Deleting stale palace drawers for %d modified file(s)",
+                        len(modified_files),
+                    )
+                    delete_result = _delete_palace_drawers(
+                        palace_path, modified_files,
+                    )
+                    if delete_result.is_left():
+                        logging.warning(
+                            "Palace drawer deletion failed (non-fatal): %s",
+                            delete_result.value,
+                        )
+
+                # ── Step 3: Mine ──────────────────────────────────────────
+                # When max_sessions is set, use a temp dir (old behavior:
+                # copy + classify + mine on subset).  The classification
+                # above already modified originals, so the temp copy picks
+                # up classified files.  Stale-drawer deletion is skipped
+                # for the temp-dir case because temp paths are ephemeral.
+                # When no max_sessions, mine the original dir directly so
+                # mempalace sees the same source_file paths and can
+                # skip-unchanged / re-mine only deleted drawers.
+                use_temp = max_sessions is not None
+                with _managed_mine_source(source, max_sessions, force_temp=use_temp) as source_dir:
                     logging.info("Starting mempalace mine: wing=%s, dir=%s", w, source_dir)
-                    launch_result = launcher.launch(source_dir, w, dry_run)
+                    launch_result = launcher.launch(
+                        source_dir, w, dry_run,
+                        extract_general=preclass_enabled,
+                    )
                     if launch_result.is_left():
                         return launch_result
                     mined = launch_result.value
@@ -350,6 +527,103 @@ class BackfillApplication:
         except FileNotFoundError:
             pass
         return result
+
+    @staticmethod
+    def classify_only(
+        output_dir: str = _DEFAULT_EXPORT_DIR,
+        wing: str | None = None,
+        max_sessions: int | None = None,
+        preview: bool = False,
+    ) -> Either[Error, int]:
+        """Classify exported sessions without mining to MemPalace.
+
+        By default, markers are written directly to the original export files
+        (in-place).  When *preview* is True, classification runs on temp
+        copies so originals are left untouched (the old behaviour).
+
+        Does NOT call ``mempalace mine``.  After reviewing the output, run
+        ``mempalace-backfill sync`` to mine the classified files into
+        MemPalace.
+        """
+        try:
+            inject.clear_and_configure(BackfillApplication._configure_injector)
+            config_svc = inject.instance(ConfigLoadService)
+            config = config_svc.load_config()
+            pre_config = config["backfill"].get("preclassification", {})
+
+            if not pre_config.get("enabled", False):
+                console.print("[yellow]Preclassification is disabled in config — nothing to do.[/yellow]")
+                return Right(0)
+
+            classifier = inject.instance(ClassifyPipeline)
+
+            if wing:
+                wing_dirs: dict[str, str] = {wing: output_dir}
+            else:
+                wing_dirs = BackfillApplication._discover_wing_dirs(output_dir)
+                if not wing_dirs:
+                    wing_dirs = {"opencode-sessions": output_dir}
+
+            total_modified = 0
+            total_marker_hits = 0
+            total_files = 0
+            for w, source in wing_dirs.items():
+                if preview:
+                    work_dir_gen = _managed_mine_source(source, max_sessions, force_temp=True)
+                else:
+                    work_dir_gen = _managed_mine_source(source, max_sessions, force_temp=False)
+
+                with work_dir_gen as source_dir:
+                    md_files = sorted(
+                        p for p in Path(source_dir).rglob("*.md")
+                        if ".tmp_sync_" not in p.parts
+                    )
+                    logging.info("Classifying %d sessions in wing '%s'", len(md_files), w)
+
+                    wing_modified = 0
+                    marker_counts: dict[str, int] = {}
+                    for f in md_files:
+                        total_files += 1
+                        result = classifier.classify_file(str(f))
+                        if result.is_right():
+                            segments = result.value
+                            if segments:
+                                apply_result = classifier.apply_markers(str(f), segments)
+                                if apply_result.is_right() and apply_result.value:
+                                    wing_modified += 1
+                                    total_modified += 1
+                                for s in segments:
+                                    for m in s.markers:
+                                        marker_counts[m] = marker_counts.get(m, 0) + 1
+                                        total_marker_hits += 1
+                        else:
+                            logging.warning("Classification failed for %s: %s", f, result.value)
+
+                    if wing_modified:
+                        markers_summary = ", ".join(
+                            f"{k}={v}" for k, v in sorted(marker_counts.items())
+                        )
+                        console.print(
+                            f"[cyan]Wing '{w}':[/cyan] {wing_modified}/{len(md_files)} files "
+                            f"got markers ({markers_summary})"
+                        )
+                    else:
+                        console.print(f"[dim]Wing '{w}': 0/{len(md_files)} files changed[/dim]")
+
+            if total_modified:
+                verb = "Preview:" if preview else "Applied:"
+                console.print(
+                    f"[green]{verb} {total_modified}/{total_files} files modified "
+                    f"({total_marker_hits} marker hits). "
+                    f"Run `sync` to mine the results into MemPalace.[/green]"
+                )
+            else:
+                console.print("[yellow]No files were modified (all already had markers?).[/yellow]")
+
+            return Right(total_modified)
+        except Exception as e:
+            logging.error("Classify failed: %s", e)
+            return Left(Error(f"Classify failed: {str(e)}", Just(e)))
 
     @staticmethod
     def clean(
@@ -431,7 +705,17 @@ def sync_cmd(
     mempalace_db_path: str = typer.Option(None, "--mempalace-db-path", help="Path to MemPalace palace database (maps to mempalace --palace)"),
     mempalace_command: str = typer.Option(None, "--mempalace-command", help="Override mempalace command path (for testing)"),
 ):
-    """Mine existing exported sessions into MemPalace."""
+    """Mine existing exported sessions into MemPalace.
+
+    When pre-classification is enabled, markers are applied directly to
+    the original export files in-place (no temp copy).  Stale palace
+    drawers for files that received new markers are deleted before the
+    mine, so only changed files get re-processed by ``mempalace mine``.
+
+    When ``--max-sessions`` is set, a temp copy is still used to limit
+    the number of files sent to the mine, and stale-drawer deletion is
+    skipped (temp paths are ephemeral).
+    """
     if output_dir is None:
         output_dir = _DEFAULT_EXPORT_DIR
     BackfillApplication._configure_logging()
@@ -442,6 +726,50 @@ def sync_cmd(
         max_sessions=max_sessions,
         mempalace_db_path=mempalace_db_path,
         mempalace_command=mempalace_command,
+    )
+    if result.is_left():
+        err = result.monoid[0]
+        if err:
+            msg = f"[red]Error: {err.message}[/red]"
+            if err.exception.is_just():
+                msg += f" (Exception: {err.exception.value})"
+            console.print(msg)
+        else:
+            console.print("[red]Error: Unknown error.[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("classify")
+def classify_cmd(
+    output_dir: str | None = typer.Option(None, "--output-dir", help="Output directory containing exported sessions (default: ~/.local/share/.../exports)"),
+    wing: str = typer.Option(None, "--wing", help="Only classify sessions in this wing"),
+    max_sessions: int | None = typer.Option(None, "--max-sessions", help="Limit to first N files per wing"),
+    preview: bool = typer.Option(False, "--preview", help="Run on temp copies without modifying originals"),
+):
+    """Classify exported sessions without mining to MemPalace.
+
+    Prefixes passages with [decision] / [milestone] / etc. markers.
+
+    By default markers are written directly to the original export files
+    (in-place).  Use --preview to run on temp copies and see what would
+    change without modifying anything.
+
+    After reviewing the output, run \b
+        mempalace-backfill sync
+    to mine the classified files into MemPalace.
+    """
+    if output_dir is None:
+        output_dir = _DEFAULT_EXPORT_DIR
+    BackfillApplication._configure_logging()
+
+    if preview:
+        console.print("[dim](Preview mode — using temp copies, originals unchanged)[/dim]")
+
+    result = BackfillApplication.classify_only(
+        output_dir=output_dir,
+        wing=wing,
+        max_sessions=max_sessions,
+        preview=preview,
     )
     if result.is_left():
         err = result.monoid[0]
@@ -505,3 +833,7 @@ def reinstall_cmd(
     if result.returncode == 0:
         console.print("[green]Reinstall complete.[/green]")
     raise typer.Exit(result.returncode)
+
+
+if __name__ == "__main__":
+    app()

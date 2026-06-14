@@ -4,18 +4,19 @@ dynamic = ["version"]
 description = "Backfill historical OpenCode sessions into MemPalace"
 requires-python = ">=3.10"
 dependencies = [
-    "typer>=0.9.0",
-    "inject>=4.3.0",
-    "pymonad>=2.4.0",
-    "rich>=13.0.0",
-    "typing-extensions>=4.0.0",
+    "chromadb==1.5.8",
+    "inject==5.3.0",
+    "pymonad==2.4.0",
+    "rich==15.0.0",
+    "typer==0.24.2",
+    "typing-extensions==4.15.0",
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8.0.0", "pytest-xdist>=3.6.0"]
+test = ["pytest==8.0.0", "pytest-xdist==3.8.0"]
 
 [dependency-groups]
-test = ["pytest>=8.0.0", "pytest-xdist>=3.6.0"]
+test = ["pytest==8.0.0", "pytest-xdist==3.8.0"]
 
 [project.scripts]
 mempalace-backfill = "mempalace_backfill.backfill_application:app"

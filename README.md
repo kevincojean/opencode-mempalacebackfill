@@ -55,6 +55,66 @@ mempalace-backfill --help
 |----------|----------|---------|-------------|
 | `LOG_LEVEL` | Optional | `INFO` | Python log level. Set to `DEBUG` for verbose output, `WARNING` to suppress info logs, or `ERROR` for errors only. |
 
+### Pre-classification (Optional)
+
+You can configure the pre-classification feature by creating or editing the `~/.config/com.kevincojean.opencode-mempalacebackfill/config.json` file. This step prefixes your sessions with explicit category markers (e.g. `[decision]`, `[problem]`) before feeding them into MemPalace, allowing automatic room routing.
+
+Only one classifier mode is available: `regex` — keyword-based pattern matching. Instant (<1ms), deterministic, no dependencies.
+
+#### Custom patterns (augmented regex)
+
+The built-in `MARKER_PATTERNS` cover generic keywords, but your personal style has unique patterns. Rather than editing source code, you add them to the config under `custom_patterns`:
+
+```json
+{
+  "backfill": {
+    "preclassification": {
+      "enabled": true,
+      "mode": "regex",
+      "custom_patterns": {
+        "decision": [
+          "ok go with \\\\w+",
+          "no \\\\w+ do it properly",
+          "just use \\\\w+ instead"
+        ],
+        "emotional": [
+          "ah \\\\w+ works now",
+          "nothing is injected",
+          "ffs",
+          "still \\\\w+ doesnt work"
+        ],
+        "milestone": [
+          "now reload \\\\w+",
+          "\\\\w+ is done finally"
+        ],
+        "problem": [
+          "fix \\\\w+ issue",
+          "whats wrong with",
+          "still broken"
+        ],
+        "architecture": [
+          "restructure as \\\\w+",
+          "use \\\\w+ pattern"
+        ],
+        "preference": [
+          "never use \\\\w+",
+          "always \\\\w+ instead"
+        ]
+      }
+    }
+  }
+}
+```
+
+**How to generate your own patterns:** Run an LLM on your latest OpenCode sessions and ask it to extract recurring phrasing patterns per marker. For example:
+
+> "Read my last 50 OpenCode sessions. For each marker (`decision`, `milestone`, `architecture`, `preference`, `problem`, `emotional`), extract 5-10 regex patterns that match how I personally express that marker. Output them as a JSON `custom_patterns` block."
+
+The patterns are case-insensitive and are merged with the built-in patterns — you never lose default coverage.
+
+- **`mode`**: `"regex"` (default). Only `"regex"` is supported.
+- **`custom_patterns`** (optional): A dict of marker → list of regex patterns (see example above). Patterns are case-insensitive and merged with built-in patterns.
+
 ## Execution and Parameters
 
 ### Commands

@@ -12,10 +12,20 @@ class ConfigLoadService:
     def __init__(self):
         self._overrides = {}
 
-    def load_config(self, overrides: dict[str, Any] = None) -> Config:
+    def load_config(self, overrides: dict[str, Any] | None = None) -> Config:
         if overrides:
             self._overrides = self._deep_merge(self._overrides, overrides)
         
+        file_config = {}
+        config_path = Path.home() / ".config" / "com.kevincojean.opencode-mempalacebackfill" / "config.json"
+        if config_path.exists():
+            import json
+            try:
+                with open(config_path, "r") as f:
+                    file_config = json.load(f)
+            except Exception:
+                pass
+
         default_config: Config = {
             "backfill": {
                 "opencode": {
@@ -24,6 +34,11 @@ class ConfigLoadService:
                 "mempalace": {
                     "wing": "backfill"
                 },
+                "preclassification": {
+                    "enabled": True,
+                    "mode": "regex",
+                    "markers": ["decision", "milestone", "architecture", "preference", "problem", "emotional"],
+                },
                 "source_dir": ".",
                 "patterns": ["*.log", "*.md"],
                 "state_file": _DEFAULT_STATE_FILE,
@@ -31,10 +46,11 @@ class ConfigLoadService:
             }
         }
         
-        config = self._deep_merge(default_config, self._overrides)
+        config = self._deep_merge(default_config, file_config)
+        config = self._deep_merge(config, self._overrides)
         return self._expand_paths(config)
 
-    def _deep_merge(self, base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    def _deep_merge(self, base: Any, overrides: dict[str, Any]) -> dict[str, Any]:
         result = base.copy()
         for key, value in overrides.items():
             if key in result and isinstance(result[key], dict) and isinstance(value, dict):
@@ -50,6 +66,7 @@ class ConfigLoadService:
             return [self._expand_paths(v) for v in config]
         elif isinstance(config, str):
             expanded = os.path.expandvars(config)
-            expanded = str(Path(expanded).expanduser())
+            if not expanded.startswith(("http://", "https://")):
+                expanded = str(Path(expanded).expanduser())
             return expanded
         return config
