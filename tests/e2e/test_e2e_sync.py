@@ -297,20 +297,23 @@ class TestSyncMaxSessions:
         assert len(leftover) == 0, "Temp dir not cleaned up"
 
     def test_given_no_max_sessions_when_sync_dry_run_then_mines_directly(
-        self, tmp_output,
+        self, tmp_output, tmp_path,
     ):
         """
         GIVEN exported files in output dir
         WHEN I run `sync --dry-run` without --max-sessions
         THEN the command references the output dir directly (no .tmp_sync_).
         """
-        Path(tmp_output, "session_001.md").write_text("# Session 1")
-        
         import json
-        config_dir = Path.home() / ".config" / "com.kevincojean.opencode-mempalacebackfill"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_file = config_dir / "config.json"
-        config_file.write_text(json.dumps({
+        import subprocess
+
+        Path(tmp_output, "session_001.md").write_text("# Session 1")
+
+        home_mock = tmp_path / "home"
+        home_mock.mkdir()
+        config_dir = home_mock / ".config" / "com.kevincojean.opencode-mempalacebackfill"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.json").write_text(json.dumps({
             "backfill": {
                 "preclassification": {
                     "enabled": False
@@ -318,21 +321,23 @@ class TestSyncMaxSessions:
             }
         }))
 
-        try:
-            result = run_cli([
-                "sync",
-                "--output-dir", tmp_output,
-                "--dry-run",
-            ])
-            assert result.returncode == 0, (
-                f"Expected exit code 0, got {result.returncode}: {result.stderr}"
-            )
-            assert ".tmp_sync_" not in result.stdout, (
-                f"Expected no temp dir path without --max-sessions and preclassification disabled, stdout: {result.stdout}"
-            )
-        finally:
-            if config_file.exists():
-                config_file.unlink()
+        env = os.environ.copy()
+        env["HOME"] = str(home_mock)
+        if "XDG_CONFIG_HOME" in env:
+            del env["XDG_CONFIG_HOME"]
+
+        result = subprocess.run(
+            ["uv", "run", "mempalace-backfill", "sync",
+             "--output-dir", tmp_output,
+             "--dry-run"],
+            capture_output=True, text=True, env=env,
+        )
+        assert result.returncode == 0, (
+            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
+        )
+        assert ".tmp_sync_" not in result.stdout, (
+            f"Expected no temp dir path without --max-sessions and preclassification disabled, stdout: {result.stdout}"
+        )
 
 
 class TestSyncDefaultPaths:
