@@ -1,5 +1,5 @@
-import os
 import shutil
+from pathlib import Path
 from typing import final
 from pymonad.either import Either, Left, Right
 from pymonad.maybe import Just
@@ -17,21 +17,23 @@ class CleanService:
         (does not count the state file in the total).
         """
         try:
-            if os.path.exists(output_dir) and not os.path.isdir(output_dir):
+            output_path = Path(output_dir)
+            state_path = Path(state_file)
+
+            if output_path.exists() and not output_path.is_dir():
                 return Left(Error(f"Not a directory: {output_dir}"))
 
             count = 0
-            if os.path.isdir(output_dir):
-                for entry in os.listdir(output_dir):
-                    entry_path = os.path.join(output_dir, entry)
-                    if os.path.isdir(entry_path):
-                        shutil.rmtree(entry_path)
+            if output_path.is_dir():
+                for entry in output_path.iterdir():
+                    if entry.is_dir():
+                        shutil.rmtree(str(entry))
                     else:
-                        os.unlink(entry_path)
+                        entry.unlink()
                     count += 1
 
-            if os.path.exists(state_file):
-                os.remove(state_file)
+            if state_path.exists():
+                state_path.unlink()
 
             return Right(count)
         except Exception as e:

@@ -19,9 +19,12 @@ from mempalace_backfill.db.session_query_repository import SessionQueryRepositor
 from mempalace_backfill.db.message_query_repository import MessageQueryRepository
 from mempalace_backfill.export.content_normalization_service import ContentNormalizationService
 from mempalace_backfill.export.markdown_conversion_service import MarkdownConversionService
-from mempalace_backfill.project_root import get_project_root
 from mempalace_backfill.state.state_file_repository import StateFileRepository
 from mempalace_backfill.mempalace.mine_launcher_service import MineLauncherService
+
+_XDG_DATA_HOME = Path.home() / ".local" / "share" / "com.kevincojean.opencode-mempalacebackfill"
+_DEFAULT_EXPORT_DIR = str(_XDG_DATA_HOME / "exports")
+_DEFAULT_STATE_FILE = str(_XDG_DATA_HOME / "state.json")
 
 console = Console()
 app = typer.Typer(add_completion=False)
@@ -32,7 +35,8 @@ def _managed_mine_source(output_dir: str, max_sessions: int | None) -> Iterator[
     """Yield a directory to mine from, creating a temp subset when max_sessions is set.
 
     When max_sessions is specified, copies the first N markdown files from the
-    output directory into a temporary subdirectory inside the output directory.
+    output directory (including any wing subdirectory structure) into a temporary
+    subdirectory inside the output directory, preserving relative paths.
     The temp directory is cleaned up on completion, error, or interrupt via the
     context manager's finally block.
     """
@@ -43,9 +47,16 @@ def _managed_mine_source(output_dir: str, max_sessions: int | None) -> Iterator[
     tmp_dir = Path(output_dir) / f".tmp_sync_{os.urandom(4).hex()}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     try:
-        md_files = sorted(Path(output_dir).glob("*.md"))
-        for f in md_files[:max_sessions]:
-            shutil.copy2(str(f), str(tmp_dir / f.name))
+        md_files = sorted(Path(output_dir).rglob("*.md"))
+        copied = 0
+        for f in md_files:
+            if copied >= max_sessions:
+                break
+            rel = f.relative_to(output_dir)
+            dest = tmp_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(f), str(dest))
+            copied += 1
         logging.debug("Temp mine dir %s: copied %d/%d markdown files",
                       tmp_dir, min(max_sessions, len(md_files)), len(md_files))
         yield str(tmp_dir)
@@ -135,11 +146,12 @@ class BackfillApplication:
         max_sessions: int = 1000,
         min_messages: int = 5,
         exclude_title: str = None,
-        output_dir: str = "./target/exports",
-        state_file: str = "./target/state.json",
+        output_dir: str = _DEFAULT_EXPORT_DIR,
+        state_file: str = _DEFAULT_STATE_FILE,
         include_system_prompt: bool = False,
         dry_run: bool = False,
         db_path: str = None,
+        wing: str | None = None,
     ) -> Either[Error, int]:
         try:
             if since is None and until is None:
@@ -222,8 +234,8 @@ class BackfillApplication:
                 logging.info("DRY-RUN: Would export %d sessions to %s", len(sessions), output_dir)
                 return Right(len(sessions))
 
-            logging.info("%s %d sessions to %s", log_prefix, len(sessions), output_dir)
-            result = svc.export_all(sessions, output_dir, include_system_prompt)
+            logging.info("%s %d sessions to %s (wing=%s)", log_prefix, len(sessions), output_dir, wing or "auto")
+            result = svc.export_all(sessions, output_dir, include_system_prompt, wing=wing)
             if result.is_left():
                 return result
 
@@ -250,11 +262,12 @@ class BackfillApplication:
         max_sessions: int = 1000,
         min_messages: int = 5,
         exclude_title: str = None,
-        output_dir: str = "./target/exports",
-        state_file: str = "./target/state.json",
+        output_dir: str = _DEFAULT_EXPORT_DIR,
+        state_file: str = _DEFAULT_STATE_FILE,
         include_system_prompt: bool = False,
         dry_run: bool = False,
         db_path: str = None,
+        wing: str | None = None,
     ) -> Either[Error, int]:
         return BackfillApplication._export_sessions(
             log_prefix="Exporting",
@@ -262,14 +275,14 @@ class BackfillApplication:
             min_messages=min_messages, exclude_title=exclude_title,
             output_dir=output_dir, state_file=state_file,
             include_system_prompt=include_system_prompt,
-            dry_run=dry_run, db_path=db_path,
+            dry_run=dry_run, db_path=db_path, wing=wing,
         )
 
     @staticmethod
     def sync(
-        output_dir: str = "./target/exports",
+        output_dir: str = _DEFAULT_EXPORT_DIR,
         dry_run: bool = False,
-        wing: str = "opencode-sessions",
+        wing: str | None = None,
         mempalace_db_path: str | None = None,
         mempalace_command: str | None = None,
         max_sessions: int | None = None,
@@ -287,31 +300,68 @@ class BackfillApplication:
                 config_svc.load_config({"backfill": {"mempalace": mempalace_overrides}})
 
             launcher = inject.instance(MineLauncherService)
-            with _managed_mine_source(output_dir, max_sessions) as source_dir:
-                logging.info("Starting mempalace mine: wing=%s, dir=%s", wing, source_dir)
-                launch_result = launcher.launch(source_dir, wing, dry_run)
-                if launch_result.is_left():
-                    return launch_result
-                else:
-                    mined = launch_result.value
-                    num_str = f"{mined} drawer{'s' if mined != 1 else ''}"
-                    console.print(f"[green]Mined {num_str} into wing '{wing}'.[/green]")
-                    logging.info("Mine complete: %d drawers into wing '%s'", mined, wing)
 
-            return Right(mined)
+            if wing:
+                wing_dirs: dict[str, str] = {wing: output_dir}
+            else:
+                wing_dirs = BackfillApplication._discover_wing_dirs(output_dir)
+                if not wing_dirs:
+                    wing_dirs = {"opencode-sessions": output_dir}
+
+            total_mined = 0
+            for w, source in wing_dirs.items():
+                with _managed_mine_source(source, max_sessions) as source_dir:
+                    logging.info("Starting mempalace mine: wing=%s, dir=%s", w, source_dir)
+                    launch_result = launcher.launch(source_dir, w, dry_run)
+                    if launch_result.is_left():
+                        return launch_result
+                    mined = launch_result.value
+                    total_mined += mined
+                    if not dry_run:
+                        num_str = f"{mined} drawer{'s' if mined != 1 else ''}"
+                        console.print(f"[green]Mined {num_str} into wing '{w}'.[/green]")
+                        logging.info("Mine complete: %d drawers into wing '%s'", mined, w)
+
+            if not dry_run:
+                total_str = f"{total_mined} drawer{'s' if total_mined != 1 else ''}"
+                console.print(f"[green]Total: {total_str} across {len(wing_dirs)} wing(s).[/green]")
+
+            return Right(total_mined)
         except Exception as e:
             logging.error("Sync failed: %s", e)
             return Left(Error(f"Sync failed: {str(e)}", Just(e)))
 
     @staticmethod
+    def _discover_wing_dirs(output_dir: str) -> dict[str, str]:
+        """Discover wing subdirectories in the output directory.
+
+        Each subdirectory whose name starts with ``wing_`` is treated as a wing
+        group. Returns a dict mapping wing name to source directory path.
+        Falls back to an empty dict if no wing subdirectories exist.
+        """
+        result: dict[str, str] = {}
+        try:
+            output_path = Path(output_dir)
+            if not output_path.is_dir():
+                return result
+            for entry in output_path.iterdir():
+                if entry.is_dir() and entry.name.startswith("wing_"):
+                    result[entry.name] = str(entry)
+        except FileNotFoundError:
+            pass
+        return result
+
+    @staticmethod
     def clean(
-        output_dir: str = "./target/exports",
-        state_file: str = "./target/state.json",
+        output_dir: str = _DEFAULT_EXPORT_DIR,
+        state_file: str = _DEFAULT_STATE_FILE,
     ) -> Either[Error, int]:
         from mempalace_backfill.clean_service import CleanService
 
-        state_existed = os.path.exists(state_file)
-        dir_exists = os.path.isdir(output_dir)
+        output_path = Path(output_dir)
+        state_path = Path(state_file)
+        state_existed = state_path.exists()
+        dir_exists = output_path.is_dir()
 
         result = CleanService.clean(output_dir, state_file)
 
@@ -340,12 +390,13 @@ def export_cmd(
     include_system_prompt: bool = typer.Option(False, "--include-system-prompt", help="Include system prompts"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing files"),
     db_path: str = typer.Option(None, "--db-path", help="Override SQLite database path"),
+    wing: str = typer.Option(None, "--wing", help="Target MemPalace wing (default: auto-detected from session project path)"),
 ):
-    """Export sessions to markdown files."""
+    """Export sessions to markdown files, organized by wing."""
     if output_dir is None:
-        output_dir = str(get_project_root() / "target" / "exports")
+        output_dir = _DEFAULT_EXPORT_DIR
     if state_file is None:
-        state_file = str(get_project_root() / "target" / "state.json")
+        state_file = _DEFAULT_STATE_FILE
     BackfillApplication._configure_logging()
     result = BackfillApplication.export(
         since=since,
@@ -357,7 +408,8 @@ def export_cmd(
         state_file=state_file,
         include_system_prompt=include_system_prompt,
         dry_run=dry_run,
-        db_path=db_path
+        db_path=db_path,
+        wing=wing,
     )
     if result.is_left():
         err = result.monoid[0]
@@ -374,14 +426,14 @@ def export_cmd(
 def sync_cmd(
     output_dir: str | None = typer.Option(None, "--output-dir", help="Output directory containing exported sessions (default: <project-root>/target/exports)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without executing"),
-    wing: str = typer.Option("opencode-sessions", "--wing", help="MemPalace wing to mine into"),
+    wing: str = typer.Option(None, "--wing", help="MemPalace wing to mine into (default: auto-detected from export subdirectories)"),
     max_sessions: int | None = typer.Option(None, "--max-sessions", help="Maximum number of session files to mine (copies first N into a temp dir)"),
     mempalace_db_path: str = typer.Option(None, "--mempalace-db-path", help="Path to MemPalace palace database (maps to mempalace --palace)"),
     mempalace_command: str = typer.Option(None, "--mempalace-command", help="Override mempalace command path (for testing)"),
 ):
     """Mine existing exported sessions into MemPalace."""
     if output_dir is None:
-        output_dir = str(get_project_root() / "target" / "exports")
+        output_dir = _DEFAULT_EXPORT_DIR
     BackfillApplication._configure_logging()
     result = BackfillApplication.sync(
         output_dir=output_dir,
@@ -410,9 +462,9 @@ def clean_cmd(
 ):
     """Remove all contents from the output directory and reset the export state."""
     if output_dir is None:
-        output_dir = str(get_project_root() / "target" / "exports")
+        output_dir = _DEFAULT_EXPORT_DIR
     if state_file is None:
-        state_file = str(get_project_root() / "target" / "state.json")
+        state_file = _DEFAULT_STATE_FILE
     BackfillApplication._configure_logging()
     result = BackfillApplication.clean(
         output_dir=output_dir,

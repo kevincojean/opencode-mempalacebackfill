@@ -1,6 +1,11 @@
 import os
+from pathlib import Path
 from typing import final, Any
 from mempalace_backfill.config_model import Config
+
+_DEFAULT_OUTPUT_DIR = str(Path.home() / ".local" / "share" / "com.kevincojean.opencode-mempalacebackfill" / "exports")
+_DEFAULT_STATE_FILE = str(Path.home() / ".local" / "share" / "com.kevincojean.opencode-mempalacebackfill" / "state.json")
+
 
 @final
 class ConfigLoadService:
@@ -21,8 +26,8 @@ class ConfigLoadService:
                 },
                 "source_dir": ".",
                 "patterns": ["*.log", "*.md"],
-                "state_file": "./target/state.json",
-                "output_dir": "./target/exports"
+                "state_file": _DEFAULT_STATE_FILE,
+                "output_dir": _DEFAULT_OUTPUT_DIR,
             }
         }
         
@@ -44,7 +49,7 @@ class ConfigLoadService:
         elif isinstance(config, list):
             return [self._expand_paths(v) for v in config]
         elif isinstance(config, str):
-            expanded = os.path.expanduser(config)
-            expanded = os.path.expandvars(expanded)
+            expanded = os.path.expandvars(config)
+            expanded = str(Path(expanded).expanduser())
             return expanded
         return config

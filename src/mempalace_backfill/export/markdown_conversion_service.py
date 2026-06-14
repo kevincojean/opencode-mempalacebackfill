@@ -2,6 +2,8 @@ import logging
 import os
 import tempfile
 import re
+from collections import defaultdict
+from pathlib import Path
 from typing import final
 import inject
 from pymonad.either import Either, Left, Right
@@ -12,6 +14,7 @@ from mempalace_backfill.config_load_service import ConfigLoadService
 from mempalace_backfill.db.models import Session, Message
 from mempalace_backfill.db.message_query_repository import MessageQueryRepository
 from mempalace_backfill.export.content_normalization_service import ContentNormalizationService
+from mempalace_backfill.infer_wing import infer_wing_from_path
 
 
 @final
@@ -31,8 +34,8 @@ class MarkdownConversionService:
         try:
             lines = [
                 f"# {session.subject}",
-                f"> Session ID: {session.id}",
-                f"> Date: {session.created_at}",
+                f"Session ID: {session.id}",
+                f"Date: {session.created_at}",
                 ""
             ]
 
@@ -54,48 +57,56 @@ class MarkdownConversionService:
         except Exception as e:
             return Left(Error(f"Failed to convert session to markdown: {str(e)}", Just(e)))
 
-    def write_file(self, output_dir: str, session_id: str, content: str) -> Either[Error, str]:
+    def write_file(self, output_dir: str, session_id: str, content: str, wing: str | None = None) -> Either[Error, str]:
         try:
-            os.makedirs(output_dir, exist_ok=True)
+            target_dir = Path(output_dir) / wing if wing else Path(output_dir)
+            target_dir.mkdir(parents=True, exist_ok=True)
             
             safe_id = re.sub(r'[^a-zA-Z0-9_\-]', '_', session_id)
-            file_path = os.path.join(output_dir, f"{safe_id}.md")
+            file_path = str(target_dir / f"{safe_id}.md")
             
-            fd, temp_path = tempfile.mkstemp(dir=output_dir, suffix=".tmp")
+            fd, temp_path = tempfile.mkstemp(dir=str(target_dir), suffix=".tmp")
             try:
                 with os.fdopen(fd, 'w') as f:
                     f.write(content)
-                os.replace(temp_path, file_path)
+                Path(temp_path).replace(file_path)
             except Exception:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                if Path(temp_path).exists():
+                    Path(temp_path).unlink()
                 raise
                 
             return Right(file_path)
         except Exception as e:
             return Left(Error(f"Failed to write markdown file: {str(e)}", Just(e)))
 
-    def export_all(self, sessions: list[Session], output_dir: str, include_system: bool = False) -> Either[Error, list[str]]:
+    def export_all(self, sessions: list[Session], output_dir: str, include_system: bool = False, wing: str | None = None) -> Either[Error, list[str]]:
         try:
-            logging.info("Exporting %d sessions to %s (include_system=%s)", len(sessions), output_dir, include_system)
-            exported_ids = []
+            logging.info("Exporting %d sessions to %s (include_system=%s, wing=%s)", len(sessions), output_dir, include_system, wing or "auto")
+
+            sessions_by_wing: dict[str, list[Session]] = defaultdict(list)
             for session in sessions:
-                messages_either = self._message_repo.get_messages(session.id, include_system=True)
-                if messages_either.is_left():
-                    continue
-                
-                normalized_either = self._normalizer.normalize_messages(messages_either.value, include_system=include_system)
-                if normalized_either.is_left():
-                    continue
-                
-                markdown_either = self.convert_to_markdown(session, normalized_either.value)
-                if markdown_either.is_left():
-                    continue
-                
-                write_either = self.write_file(output_dir, session.id, markdown_either.value)
-                if write_either.is_right():
-                    exported_ids.append(session.id)
-            
+                w = wing if wing else (infer_wing_from_path(session.project_path) if session.project_path else "wing_general")
+                sessions_by_wing[w].append(session)
+
+            exported_ids: list[str] = []
+            for w, wing_sessions in sessions_by_wing.items():
+                for session in wing_sessions:
+                    messages_either = self._message_repo.get_messages(session.id, include_system=True)
+                    if messages_either.is_left():
+                        continue
+
+                    normalized_either = self._normalizer.normalize_messages(messages_either.value, include_system=include_system)
+                    if normalized_either.is_left():
+                        continue
+
+                    markdown_either = self.convert_to_markdown(session, normalized_either.value)
+                    if markdown_either.is_left():
+                        continue
+
+                    write_either = self.write_file(output_dir, session.id, markdown_either.value, wing=w)
+                    if write_either.is_right():
+                        exported_ids.append(session.id)
+
             return Right(exported_ids)
         except Exception as e:
             return Left(Error(f"Failed to export sessions: {str(e)}", Just(e)))

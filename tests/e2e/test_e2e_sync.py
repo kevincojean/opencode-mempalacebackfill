@@ -6,6 +6,19 @@ from pathlib import Path
 from tests.e2e.helpers import run_cli, mock_mempalace_script
 
 
+def _create_wing_dirs(base: str, structure: dict[str, list[str]]) -> None:
+    """Create a wing subdirectory structure for testing.
+
+    ``structure`` maps wing names to lists of session file basenames (without .md).
+    Files are created with minimal valid content.
+    """
+    for wing, sessions in structure.items():
+        wing_dir = Path(base, wing)
+        wing_dir.mkdir(parents=True, exist_ok=True)
+        for ses in sessions:
+            (wing_dir / f"{ses}.md").write_text(f"# {ses}")
+
+
 class TestSyncBasic:
     """Acceptance criteria: sync mines existing exported sessions."""
 
@@ -307,29 +320,183 @@ class TestSyncMaxSessions:
 
 
 class TestSyncDefaultPaths:
-    """Acceptance criteria: default paths resolve against project root, not CWD."""
+    """Acceptance criteria: default paths resolve to stable XDG location."""
 
-    def test_given_no_output_dir_when_sync_from_subdir_then_resolves_to_project_root(
+    def test_given_no_output_dir_when_sync_dry_run_then_resolves_to_xdg_path(
         self,
     ):
         """
-        GIVEN the default output dir (no --output-dir flag)
-        WHEN I run `sync --dry-run` from a project subdirectory
-        THEN the mined dir is the project-root-absolute path, not CWD-relative.
+        GIVEN no --output-dir flag
+        WHEN I run `sync --dry-run`
+        THEN the mined dir is the XDG data home path, not project-relative.
         """
-        project_root = Path(__file__).resolve().parent.parent.parent
-        subdir = str(project_root / "src")
-        expected_output_dir = str(project_root / "target" / "exports")
+        expected_dir = str(
+            Path.home() / ".local" / "share" / "com.kevincojean.opencode-mempalacebackfill" / "exports"
+        )
 
         result = run_cli([
             "sync",
             "--dry-run",
-        ], cwd=subdir)
+        ])
 
         assert result.returncode == 0, (
             f"Expected exit code 0, got {result.returncode}: {result.stderr}"
         )
-        assert expected_output_dir in result.stdout, (
-            f"Expected default output dir '{expected_output_dir}' in sync command, "
+        assert expected_dir in result.stdout, (
+            f"Expected default output dir '{expected_dir}' in sync command, "
             f"stdout: {result.stdout}"
+        )
+
+
+class TestSyncWingAutoDetect:
+    """Acceptance criteria: sync auto-discovers wing subdirectories."""
+
+    def test_given_wing_dirs_when_sync_dry_run_then_mines_each_wing(
+        self, tmp_output,
+    ):
+        """
+        GIVEN wing subdirectories wing_proj1 (2 sessions) and wing_my-app (1 session)
+        WHEN I run `sync --dry-run` without ``--wing``
+        THEN the output shows two command lines, one per wing.
+        """
+        _create_wing_dirs(tmp_output, {
+            "wing_proj1": ["ses_a", "ses_b"],
+            "wing_my-app": ["ses_c"],
+        })
+
+        result = run_cli([
+            "sync",
+            "--output-dir", tmp_output,
+            "--dry-run",
+        ])
+        assert result.returncode == 0, (
+            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
+        )
+        assert "--wing wing_proj1" in result.stdout, (
+            f"Expected --wing wing_proj1 in dry-run output, got: {result.stdout}"
+        )
+        assert "--wing wing_my-app" in result.stdout, (
+            f"Expected --wing wing_my-app in dry-run output, got: {result.stdout}"
+        )
+
+    def test_given_flat_dir_when_sync_dry_run_then_falls_back_to_opencode_sessions(
+        self, tmp_output,
+    ):
+        """
+        GIVEN a flat output directory with .md files (no wing subdirectories)
+        WHEN I run `sync --dry-run` without ``--wing``
+        THEN the fallback wing "opencode-sessions" appears in the command.
+        """
+        Path(tmp_output, "session_001.md").write_text("# Session 1")
+        Path(tmp_output, "session_002.md").write_text("# Session 2")
+
+        result = run_cli([
+            "sync",
+            "--output-dir", tmp_output,
+            "--dry-run",
+        ])
+        assert result.returncode == 0, (
+            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
+        )
+        assert "opencode-sessions" in result.stdout, (
+            f"Expected fallback wing 'opencode-sessions' in dry-run output, "
+            f"stdout: {result.stdout}"
+        )
+
+    def test_given_wing_dirs_with_override_when_sync_dry_run_then_single_wing(
+        self, tmp_output,
+    ):
+        """
+        GIVEN wing subdirectories wing_proj1 and wing_my-app
+        WHEN I run `sync --wing override-wing --dry-run`
+        THEN only the override wing appears in the command output
+        AND the wing subdirectory names do not appear.
+        """
+        _create_wing_dirs(tmp_output, {
+            "wing_proj1": ["ses_a"],
+            "wing_my-app": ["ses_b"],
+        })
+
+        result = run_cli([
+            "sync",
+            "--output-dir", tmp_output,
+            "--wing", "override-wing",
+            "--dry-run",
+        ])
+        assert result.returncode == 0, (
+            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
+        )
+        assert "override-wing" in result.stdout, (
+            f"Expected 'override-wing' in output, got: {result.stdout}"
+        )
+        assert "--wing wing_proj1" not in result.stdout, (
+            "Expected no --wing wing_proj1 when --wing is explicitly provided"
+        )
+
+
+class TestSyncWingDryRun:
+    """Acceptance criteria: dry-run with wing subdirectories shows all commands."""
+
+    def test_given_multiple_wing_dirs_when_sync_dry_run_then_shows_multiple_commands(
+        self, tmp_output,
+    ):
+        """
+        GIVEN wing subdirectories wing_a and wing_b with session files
+        WHEN I run `sync --dry-run`
+        THEN two [DRY-RUN] Command: lines appear in the output.
+        """
+        _create_wing_dirs(tmp_output, {
+            "wing_a": ["s1"],
+            "wing_b": ["s2"],
+        })
+
+        result = run_cli([
+            "sync",
+            "--output-dir", tmp_output,
+            "--dry-run",
+        ])
+        assert result.returncode == 0, (
+            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
+        )
+        dr_lines = [l for l in result.stdout.split("\n") if "[DRY-RUN]" in l]
+        assert len(dr_lines) == 2, (
+            f"Expected 2 [DRY-RUN] lines for 2 wings, found {len(dr_lines)}: {result.stdout}"
+        )
+
+
+class TestSyncWingMine:
+    """Acceptance criteria: sync mines each wing subdirectory into its own wing."""
+
+    def test_given_wing_dirs_when_sync_then_mines_each_separately(
+        self, tmp_output,
+    ):
+        """
+        GIVEN wing subdirectories wing_a and wing_b with session files
+        WHEN I run `sync` with a mock mempalace that records its args
+        THEN the mock is called twice, once per wing.
+        """
+        _create_wing_dirs(tmp_output, {
+            "wing_a": ["s1"],
+            "wing_b": ["s2"],
+        })
+
+        call_log = os.path.join(tmp_output, "calls.txt")
+
+        with mock_mempalace_script(
+            body=f"#!/bin/sh\necho $@ >> {call_log}\necho '1 drawers'\nexit 0\n"
+        ) as mock_cmd:
+            result = run_cli([
+                "sync",
+                "--output-dir", tmp_output,
+                "--mempalace-command", mock_cmd,
+            ])
+        assert result.returncode == 0, (
+            f"Expected exit code 0, got {result.returncode}: {result.stderr}"
+        )
+
+        assert os.path.exists(call_log), f"Call log not created at {call_log}"
+        with open(call_log) as f:
+            calls = f.read().strip().split("\n")
+        assert len(calls) == 2, (
+            f"Expected 2 mine calls (one per wing), got {len(calls)}: {calls}"
         )

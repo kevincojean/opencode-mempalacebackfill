@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass, field, asdict
+from pathlib import Path
 from typing import final
 import inject
 from pymonad.either import Either, Left, Right
@@ -44,7 +45,7 @@ class StateFileRepository:
             config = self._config_service.load_config()
             path = config["backfill"]["state_file"]
             
-            if not os.path.exists(path):
+            if not Path(path).exists():
                 return Right(SyncState())
 
             with open(path, "r") as f:
@@ -58,16 +59,16 @@ class StateFileRepository:
             config = self._config_service.load_config()
             path = config["backfill"]["state_file"]
             
-            os.makedirs(os.path.dirname(path), exist_ok=True)
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-            fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(path))
+            fd, temp_path = tempfile.mkstemp(dir=str(Path(path).parent))
             try:
                 with os.fdopen(fd, 'w') as f:
                     json.dump(asdict(state), f, indent=4)
-                os.replace(temp_path, path)
+                Path(temp_path).replace(path)
             except Exception:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                if Path(temp_path).exists():
+                    Path(temp_path).unlink()
                 raise
 
             return Right(True)

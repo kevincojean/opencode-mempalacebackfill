@@ -9,6 +9,7 @@ class Session:
     subject: str
     created_at: datetime
     message_count: int
+    project_path: str | None = None
 
 @final
 @dataclass(frozen=True)

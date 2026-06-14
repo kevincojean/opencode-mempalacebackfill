@@ -28,33 +28,35 @@ class SessionQueryRepository:
             cursor = conn.cursor()
             
             query = """
-                SELECT id, title, time_created,
-                (SELECT COUNT(*) FROM message WHERE session_id = session.id) as message_count
-                FROM session
+                SELECT s.id, s.title, s.time_created,
+                (SELECT COUNT(*) FROM message WHERE session_id = s.id) as message_count,
+                p.worktree
+                FROM session s
+                LEFT JOIN project p ON s.project_id = p.id
             """
             params = []
             where_clauses = []
             
             if filters.get("since"):
-                where_clauses.append("time_created >= ?")
+                where_clauses.append("s.time_created >= ?")
                 params.append(int(filters["since"].timestamp() * 1000))
             
             if filters.get("until"):
-                where_clauses.append("time_created <= ?")
+                where_clauses.append("s.time_created <= ?")
                 params.append(int(filters["until"].timestamp() * 1000))
                 
             if filters.get("exclude_title"):
-                where_clauses.append("title NOT LIKE ?")
+                where_clauses.append("s.title NOT LIKE ?")
                 params.append(f"%{filters['exclude_title']}%")
                 
             if where_clauses:
                 query += " WHERE " + " AND ".join(where_clauses)
             
             if filters.get("min_messages"):
-                query += " GROUP BY session.id HAVING message_count >= ?"
+                query += " GROUP BY s.id HAVING message_count >= ?"
                 params.append(filters["min_messages"])
             
-            query += " ORDER BY time_created DESC"
+            query += " ORDER BY s.time_created DESC"
             
             limit = filters.get("max_sessions") or filters.get("limit", 1000)
             offset = filters.get("offset", 0)
@@ -70,7 +72,8 @@ class SessionQueryRepository:
                     id=row[0],
                     subject=row[1],
                     created_at=datetime.fromtimestamp(row[2] / 1000.0),
-                    message_count=row[3]
+                    message_count=row[3],
+                    project_path=row[4],
                 ) for row in rows
             ]
             

@@ -75,8 +75,8 @@ mempalace-backfill export [OPTIONS]
 | `--until` | Optional | — | Export sessions before this date (ISO format) |
 | `--exclude-title` | Optional | — | Regex pattern to exclude session titles |
 | `--min-messages` | Optional | `5` | Minimum number of messages a session must have |
-| `--output-dir` | Optional | `./target/exports` | Directory to write markdown files |
-| `--state-file` | Optional | `./target/state.json` | Path to state file for incremental exports |
+| `--output-dir` | Optional | `~/.local/share/com.kevincojean.opencode-mempalacebackfill/exports` | Directory to write markdown files |
+| `--state-file` | Optional | `~/.local/share/com.kevincojean.opencode-mempalacebackfill/state.json` | Path to state file for incremental exports |
 | `--include-system-prompt` | Optional | `False` | Include system prompt messages in the output |
 | `--dry-run` | Optional | `False` | Preview how many sessions would be exported without writing files |
 
@@ -90,7 +90,7 @@ mempalace-backfill sync [OPTIONS]
 
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
-| `--output-dir` | Optional | `./target/exports` | Directory containing exported markdown files |
+| `--output-dir` | Optional | `~/.local/share/com.kevincojean.opencode-mempalacebackfill/exports` | Directory containing exported markdown files |
 | `--max-sessions` | Optional | — | Maximum number of session files to mine (copies first N into a temp dir) |
 | `--wing` | Optional | `opencode-sessions` | MemPalace wing to mine into |
 | `--mempalace-db-path` | Optional | — | Path to MemPalace palace database (maps to `mempalace --palace`) |
@@ -107,8 +107,8 @@ mempalace-backfill clean [OPTIONS]
 
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
-| `--output-dir` | Optional | `./target/exports` | Directory to clean |
-| `--state-file` | Optional | `./target/state.json` | State file to remove |
+| `--output-dir` | Optional | `~/.local/share/com.kevincojean.opencode-mempalacebackfill/exports` | Directory to clean |
+| `--state-file` | Optional | `~/.local/share/com.kevincojean.opencode-mempalacebackfill/state.json` | State file to remove |
 
 #### `test`
 
