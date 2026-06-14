@@ -39,105 +39,125 @@ class MineLauncherService:
     def _check_lock_error(output: str) -> bool:
         return any(p.search(output) for p in _LOCK_PATTERNS)
 
+    def _repair_and_retry(
+        self, base_cmd: str, palace_path: str | None, mine_cmd: list[str],
+    ) -> Either[Error, int]:
+        """Attempt palace repair after SIGSEGV and retry the mine once."""
+        repair_cmd = [base_cmd, "repair", "--mode", "from-sqlite", "--yes", "--archive-existing"]
+        if palace_path:
+            repair_cmd.extend(["--palace", palace_path])
+
+        logging.info("Attempting palace repair after mine SIGSEGV: %s", " ".join(repair_cmd))
+        try:
+            repair_proc = subprocess.run(repair_cmd, capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            return Left(Error("Palace repair timed out after 600s"))
+
+        if repair_proc.returncode != 0:
+            return Left(Error(
+                f"mempalace mine failed with exit code -11 (SIGSEGV) and palace repair also failed "
+                f"(exit {repair_proc.returncode}): {repair_proc.stderr or repair_proc.stdout}"
+            ))
+
+        logging.info("Palace repair succeeded — retrying mine")
+        return self._run_mine(mine_cmd, base_cmd, palace_path)
+
+    def _run_mine(self, cmd: list[str], base_cmd: str = "mempalace", palace_path: str | None = None) -> Either[Error, int]:
+        """Run a single mine subprocess and return the result."""
+        logging.info("Starting mempalace mine: %s", " ".join(cmd))
+
+        master_fd, slave_fd = pty.openpty()
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+        )
+        os.close(slave_fd)
+
+        logging.info("Mempalace mine PID %d started", process.pid)
+
+        output_lines: list[str] = []
+        buffer = ""
+
+        while True:
+            r, _, _ = select.select([master_fd], [], [], _LINE_TIMEOUT)
+            if not r:
+                process.kill()
+                process.wait()
+                os.close(master_fd)
+                combined = "\n".join(output_lines)
+                return Left(Error(
+                    f"mempalace mine produced no output for {_LINE_TIMEOUT}s. "
+                    f"Partial output: {combined}"
+                ))
+
+            try:
+                data = os.read(master_fd, 65536)
+            except OSError:
+                break
+
+            if not data:
+                break
+
+            text = data.decode("utf-8", errors="replace")
+            buffer += text
+
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.rstrip("\r")
+                output_lines.append(line)
+                if line:
+                    logging.info("[mempalace] %s", line)
+
+        if buffer:
+            buffer = buffer.rstrip("\r")
+            output_lines.append(buffer)
+            if buffer:
+                logging.info("[mempalace] %s", buffer)
+
+        os.close(master_fd)
+        process.wait()
+        combined_output = "\n".join(output_lines)
+
+        if process.returncode != 0:
+            if process.returncode == -11:
+                return self._repair_and_retry(base_cmd, palace_path, cmd)
+            if MineLauncherService._check_lock_error(combined_output):
+                return Left(Error(
+                    f"mempalace is locked: {combined_output}"
+                ))
+            return Left(Error(
+                f"mempalace mine failed with exit code {process.returncode}: {combined_output}"
+            ))
+
+        match = re.search(r"(\d+)\s+drawers?", combined_output)
+        if match:
+            return Right(int(match.group(1)))
+
+        return Right(0)
+
     def launch(self, export_dir: str, wing: str, dry_run: bool = False, extract_general: bool = False) -> Either[Error, int]:
-        cmd = self._build_command(export_dir, wing, extract_general)
-        
         if dry_run:
+            cmd = self._build_command(export_dir, wing, extract_general)
             print(f"[DRY-RUN] Command: {' '.join(cmd)}")
             return Right(0)
 
+        config = self._config_service.load_config()
+        base_cmd = "mempalace"
+        palace_path: str | None = None
         try:
-            logging.info("Starting mempalace mine: %s", ' '.join(cmd))
+            mempalace_config = config.get("backfill", {}).get("mempalace", {})
+            if isinstance(mempalace_config, dict):
+                base_cmd = mempalace_config.get("command", "mempalace")
+                palace_path = mempalace_config.get("palace_path")
+        except (AttributeError, KeyError):
+            pass
 
-            # ── Pseudo-terminal for reliable real-time output ────────────
-            #
-            # We spawn mempalace through a PTY (pseudo-terminal) instead of a
-            # regular pipe.  A PTY is a kernel device pair:
-            #
-            #   master_fd  ← we read from this (the "terminal" side)
-            #   slave_fd   → child writes to this (the "program" side)
-            #
-            # The child process thinks stdout/stderr are a real terminal, so
-            # the C runtime picks line-buffered mode automatically.  Each
-            # print() that ends with \n flushes immediately — no buffering
-            # delay on the pipe.
-            #
-            # Why not stdbuf -oL?  stdbuf uses LD_PRELOAD which many
-            # environments disable (containers, setuid, AT_SECURE).  Why not
-            # PYTHONUNBUFFERED?  mempalace's shebang uses -E which ignores
-            # it.  The PTY approach works unconditionally.
-            master_fd, slave_fd = pty.openpty()
-            process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                close_fds=True,
-            )
-            os.close(slave_fd)
-
-            logging.info("Mempalace mine PID %d started", process.pid)
-
-            output_lines: list[str] = []
-            buffer = ""
-
-            while True:
-                r, _, _ = select.select([master_fd], [], [], _LINE_TIMEOUT)
-                if not r:
-                    process.kill()
-                    process.wait()
-                    os.close(master_fd)
-                    combined = '\n'.join(output_lines)
-                    return Left(Error(
-                        f"mempalace mine produced no output for {_LINE_TIMEOUT}s. "
-                        f"Partial output: {combined}"
-                    ))
-
-                try:
-                    data = os.read(master_fd, 65536)
-                except OSError:
-                    # Common on PTY reads after child has exited (EIO).
-                    break
-
-                if not data:
-                    break
-
-                text = data.decode("utf-8", errors="replace")
-                buffer += text
-
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.rstrip("\r")
-                    output_lines.append(line)
-                    if line:
-                        logging.info("[mempalace] %s", line)
-
-            # Flush any remaining partial line.
-            if buffer:
-                buffer = buffer.rstrip("\r")
-                output_lines.append(buffer)
-                if buffer:
-                    logging.info("[mempalace] %s", buffer)
-
-            os.close(master_fd)
-            process.wait()
-            combined_output = "\n".join(output_lines)
-
-            if process.returncode != 0:
-                if MineLauncherService._check_lock_error(combined_output):
-                    return Left(Error(
-                        f"mempalace is locked: {combined_output}"
-                    ))
-                return Left(Error(
-                    f"mempalace mine failed with exit code {process.returncode}: {combined_output}"
-                ))
-
-            match = re.search(r"(\d+)\s+drawers?", combined_output)
-            if match:
-                return Right(int(match.group(1)))
-
-            return Right(0)
-
+        try:
+            cmd = self._build_command(export_dir, wing, extract_general)
+            return self._run_mine(cmd, base_cmd, palace_path)
         except FileNotFoundError:
             return Left(Error("mempalace not found in PATH"))
         except Exception as e:

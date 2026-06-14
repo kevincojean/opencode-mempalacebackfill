@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import subprocess
@@ -46,6 +47,113 @@ def _resolve_palace_path(config: dict, cli_palace_path: str | None) -> str:
         return _DEFAULT_PALACE_DIR
 
 
+def _run_delete_drawers_subprocess(
+    palace_path: str,
+    source_files: set[str],
+    extract_mode: str | None = "exchange",
+) -> Either[Error, int]:
+    """Run drawer deletion in a subprocess to isolate ChromaDB segfaults.
+
+    ChromaDB 1.5.8 (used by MemPalace 3.4.0) can segfault in the HNSW
+    segment writer during ``collection.delete()``.  Running it in a
+    subprocess prevents the segfault from killing the main process.
+
+    Returns:
+        Right with count of deleted drawers (0 if nothing to delete),
+        or Left on error (including segfault).
+    """
+    if not source_files:
+        return Right(0)
+
+    helper_path = Path(__file__).parent / "delete_drawers_helper.py"
+    if not helper_path.is_file():
+        logging.warning("Deletion helper not found at %s — skipping deletion", helper_path)
+        return Right(0)
+
+    args = {
+        "palace_path": palace_path,
+        "source_files": sorted(source_files),
+        "extract_mode": extract_mode,
+    }
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(helper_path), json.dumps(args)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        logging.warning("Drawer deletion timed out after 120s — skipping")
+        return Left(Error("Deletion timed out"))
+
+    # SIGSEGV (exit code -11) — ChromaDB segfault, palace may be corrupted.
+    if proc.returncode == -11:
+        logging.warning(
+            "ChromaDB deletion segfaulted (HNSW segment writer crash). "
+            "Palace index may need repair."
+        )
+        return Left(Error("ChromaDB segfault during deletion"))
+
+    if proc.returncode != 0:
+        try:
+            result = json.loads(proc.stdout)
+            msg = result.get("message", proc.stderr or proc.stdout or f"exit code {proc.returncode}")
+        except (json.JSONDecodeError, KeyError):
+            msg = proc.stderr or proc.stdout or f"exit code {proc.returncode}"
+        logging.warning("Drawer deletion failed: %s", msg)
+        return Left(Error(f"Deletion failed: {msg}"))
+
+    try:
+        result = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        logging.warning("Could not parse deletion helper output: %s", proc.stdout)
+        return Right(0)
+
+    deleted = result.get("deleted", 0)
+    status = result.get("status", "ok")
+    if status == "partial":
+        failed = result.get("failed", [])
+        logging.warning(
+            "Drawer deletion partial: deleted %d, %d file(s) failed: %s",
+            deleted, len(failed), "; ".join(failed),
+        )
+    elif deleted:
+        logging.info("Deleted %d stale drawer(s) from %d file(s)", deleted, len(source_files))
+    return Right(deleted)
+
+
+def _repair_palace(palace_path: str) -> Either[Error, str]:
+    """Rebuild the palace vector index using ``mempalace repair --mode from-sqlite``.
+
+    This bypasses the ChromaDB client entirely, reading rows directly from
+    ``chroma.sqlite3``, and is the safest recovery path after an HNSW
+    segfault.
+
+    Returns:
+        Right with repair output, or Left on failure.
+    """
+    try:
+        proc = subprocess.run(
+            ["mempalace", "repair", "--mode", "from-sqlite", "--yes", "--archive-existing", "--palace", palace_path],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except FileNotFoundError:
+        return Left(Error("mempalace not found in PATH — cannot repair palace"))
+    except subprocess.TimeoutExpired:
+        return Left(Error("Palace repair timed out after 600s"))
+
+    if proc.returncode == 0:
+        logging.info("Palace repair completed successfully")
+        return Right(proc.stdout)
+    else:
+        msg = f"Palace repair failed (exit {proc.returncode}): {proc.stderr or proc.stdout}"
+        logging.warning(msg)
+        return Left(Error(msg))
+
+
 def _delete_palace_drawers(
     palace_path: str,
     source_files: set[str],
@@ -53,81 +161,34 @@ def _delete_palace_drawers(
 ) -> Either[Error, int]:
     """Delete drawers for given source files from the palace ChromaDB.
 
-    Uses ChromaDB directly to remove stale drawers before re-mining,
-    so only files whose content changed get re-processed.
+    Runs the ChromaDB operation in a **subprocess** to isolate segfaults
+    from the HNSW segment writer (ChromaDB 1.5.8 known issue).
 
-    Args:
-        palace_path: Path to the MemPalace palace directory.
-        source_files: Set of source file paths whose drawers to delete.
-        extract_mode: Delete only drawers with this extract_mode
-            (default ``"exchange"``). Set ``None`` to delete all modes.
+    On segfault, attempts automatic palace repair via
+    ``mempalace repair --mode from-sqlite`` before returning.
 
     Returns:
-        Right with count of deleted drawers, or Left on error.
+        Right with count of deleted drawers (0 if segfault-repaired),
+        or Left on error.
     """
-    if not source_files:
-        return Right(0)
+    result = _run_delete_drawers_subprocess(palace_path, source_files, extract_mode)
 
-    try:
-        import chromadb
-        from chromadb.config import Settings as ChromaSettings
-    except ImportError:
-        logging.warning(
-            "chromadb not available — cannot delete stale palace drawers. "
-            "Install chromadb or run sync without preclassification."
-        )
-        return Left(Error("chromadb not available"))
+    if result.is_right():
+        return result
 
-    try:
-        db_path = Path(palace_path)
-        if not db_path.is_dir():
-            logging.warning("Palace directory not found: %s", palace_path)
+    # If the subprocess segfaulted, try to repair the palace index
+    # before giving up.  The caller can decide whether to retry.
+    error_msg = str(result.value)
+    if "segfault" in error_msg or "HNSW" in error_msg:
+        logging.info("Attempting palace repair after deletion segfault...")
+        repair_result = _repair_palace(palace_path)
+        if repair_result.is_right():
+            logging.info("Palace repaired — deletions not applied, will re-mine all files")
             return Right(0)
+        else:
+            logging.warning("Palace repair also failed: %s", repair_result.value)
 
-        client = chromadb.PersistentClient(
-            path=str(db_path),
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
-        try:
-            collection = client.get_collection("mempalace_drawers")
-        except ValueError:
-            logging.info("Collection 'mempalace_drawers' does not exist yet — nothing to delete")
-            return Right(0)
-
-        total_deleted = 0
-        for src in sorted(source_files):
-            try:
-                # ChromaDB 1.5.8 requires $and/$or syntax when the where
-                # clause has more than one condition — a flat dict with
-                # multiple keys raises "Expected where to have exactly
-                # one operator".
-                if extract_mode is not None:
-                    where: dict = {
-                        "$and": [
-                            {"source_file": src},
-                            {"extract_mode": extract_mode},
-                        ]
-                    }
-                else:
-                    where = {"source_file": src}
-
-                result = collection.get(where=where, include=[])
-                ids = result.get("ids", [])
-                if ids:
-                    collection.delete(ids=ids)
-                    total_deleted += len(ids)
-                    logging.debug("Deleted %d drawers for %s", len(ids), src)
-            except Exception as e:
-                logging.warning("Failed to delete drawers for %s: %s", src, e)
-
-        if total_deleted:
-            logging.info("Deleted %d stale drawer(s) from %d file(s)", total_deleted, len(source_files))
-        return Right(total_deleted)
-
-    except Exception as e:
-        msg = f"Failed to access palace ChromaDB at {palace_path}: {e}"
-        logging.error(msg)
-        return Left(Error(msg))
+    return result
 app = typer.Typer(add_completion=False)
 
 
