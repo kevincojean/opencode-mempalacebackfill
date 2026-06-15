@@ -59,8 +59,6 @@ mempalace-backfill --help
 
 You can configure the pre-classification feature by creating or editing the `~/.config/com.kevincojean.opencode-mempalacebackfill/config.json` file. This step prefixes your sessions with explicit category markers (e.g. `[decision]`, `[problem]`) before feeding them into MemPalace, allowing automatic room routing.
 
-Only one classifier mode is available: `regex` — keyword-based pattern matching. Instant (<1ms), deterministic, no dependencies.
-
 #### Custom patterns (augmented regex)
 
 The built-in `MARKER_PATTERNS` cover generic keywords, but your personal style has unique patterns. Rather than editing source code, you add them to the config under `custom_patterns`:
@@ -112,7 +110,6 @@ The built-in `MARKER_PATTERNS` cover generic keywords, but your personal style h
 
 The patterns are case-insensitive and are merged with the built-in patterns — you never lose default coverage.
 
-- **`mode`**: `"regex"` (default). Only `"regex"` is supported.
 - **`custom_patterns`** (optional): A dict of marker → list of regex patterns (see example above). Patterns are case-insensitive and merged with built-in patterns.
 
 ## Execution and Parameters
