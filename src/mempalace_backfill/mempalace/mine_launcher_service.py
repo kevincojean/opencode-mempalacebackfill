@@ -1,9 +1,11 @@
+import json
 import logging
 import os
 import pty
 import re
 import select
 import subprocess
+import tempfile
 from typing import final
 import inject
 from pymonad.either import Either, Left, Right
@@ -41,6 +43,7 @@ class MineLauncherService:
 
     def _repair_and_retry(
         self, base_cmd: str, palace_path: str | None, mine_cmd: list[str],
+        env: dict[str, str] | None = None,
     ) -> Either[Error, int]:
         """Attempt palace repair after SIGSEGV and retry the mine once."""
         repair_cmd = [base_cmd, "repair", "--mode", "from-sqlite", "--yes", "--archive-existing"]
@@ -49,7 +52,7 @@ class MineLauncherService:
 
         logging.info("Attempting palace repair after mine SIGSEGV: %s", " ".join(repair_cmd))
         try:
-            repair_proc = subprocess.run(repair_cmd, capture_output=True, text=True, timeout=600)
+            repair_proc = subprocess.run(repair_cmd, capture_output=True, text=True, timeout=600, env=env)
         except subprocess.TimeoutExpired:
             return Left(Error("Palace repair timed out after 600s"))
 
@@ -60,9 +63,9 @@ class MineLauncherService:
             ))
 
         logging.info("Palace repair succeeded — retrying mine")
-        return self._run_mine(mine_cmd, base_cmd, palace_path)
+        return self._run_mine(mine_cmd, base_cmd, palace_path, env=env)
 
-    def _run_mine(self, cmd: list[str], base_cmd: str = "mempalace", palace_path: str | None = None) -> Either[Error, int]:
+    def _run_mine(self, cmd: list[str], base_cmd: str = "mempalace", palace_path: str | None = None, env: dict[str, str] | None = None) -> Either[Error, int]:
         """Run a single mine subprocess and return the result."""
         logging.info("Starting mempalace mine: %s", " ".join(cmd))
 
@@ -73,6 +76,7 @@ class MineLauncherService:
             stdout=slave_fd,
             stderr=slave_fd,
             close_fds=True,
+            env=env,
         )
         os.close(slave_fd)
 
@@ -123,7 +127,7 @@ class MineLauncherService:
 
         if process.returncode != 0:
             if process.returncode == -11:
-                return self._repair_and_retry(base_cmd, palace_path, cmd)
+                return self._repair_and_retry(base_cmd, palace_path, cmd, env=env)
             if MineLauncherService._check_lock_error(combined_output):
                 return Left(Error(
                     f"mempalace is locked: {combined_output}"
@@ -155,13 +159,41 @@ class MineLauncherService:
         except (AttributeError, KeyError):
             pass
 
+        # Feed the backfill's custom regex patterns into mempalace's classifier
+        # via the MEMPALACE_CUSTOM_PATTERNS env var.  general_extractor.py reads
+        # this at import time and appends the patterns to its built-in marker sets.
+        patterns_file: str | None = None
+        env: dict[str, str] | None = None
+        try:
+            custom_patterns = (
+                config.get("backfill", {})
+                .get("preclassification", {})
+                .get("custom_patterns", {})
+            )
+            if custom_patterns:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", delete=False, prefix="mempalace_custom_patterns_"
+                ) as f:
+                    json.dump(custom_patterns, f)
+                    patterns_file = f.name
+                env = os.environ.copy()
+                env["MEMPALACE_CUSTOM_PATTERNS"] = patterns_file
+        except (AttributeError, KeyError, OSError) as e:
+            logging.warning("Could not export custom patterns to mempalace: %s", e)
+
         try:
             cmd = self._build_command(export_dir, wing, extract_general)
-            return self._run_mine(cmd, base_cmd, palace_path)
+            return self._run_mine(cmd, base_cmd, palace_path, env=env)
         except FileNotFoundError:
             return Left(Error("mempalace not found in PATH"))
         except Exception as e:
             return Left(Error(f"Unexpected error during mempalace mine: {str(e)}", Just(e)))
+        finally:
+            if patterns_file:
+                try:
+                    os.unlink(patterns_file)
+                except OSError:
+                    pass
 
     def _build_command(self, export_dir: str, wing: str, extract_general: bool = False) -> list[str]:
         config = self._config_service.load_config()

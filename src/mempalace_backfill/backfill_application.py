@@ -800,48 +800,8 @@ def sync_cmd(
         raise typer.Exit(1)
 
 
-@app.command("classify")
-def classify_cmd(
-    output_dir: str | None = typer.Option(None, "--output-dir", help="Output directory containing exported sessions (default: ~/.local/share/.../exports)"),
-    wing: str = typer.Option(None, "--wing", help="Only classify sessions in this wing"),
-    max_sessions: int | None = typer.Option(None, "--max-sessions", help="Limit to first N files per wing"),
-    preview: bool = typer.Option(False, "--preview", help="Run on temp copies without modifying originals"),
-):
-    """Classify exported sessions without mining to MemPalace.
-
-    Prefixes passages with [decision] / [milestone] / etc. markers.
-
-    By default markers are written directly to the original export files
-    (in-place).  Use --preview to run on temp copies and see what would
-    change without modifying anything.
-
-    After reviewing the output, run \b
-        mempalace-backfill sync
-    to mine the classified files into MemPalace.
-    """
-    if output_dir is None:
-        output_dir = _DEFAULT_EXPORT_DIR
-    BackfillApplication._configure_logging()
-
-    if preview:
-        console.print("[dim](Preview mode — using temp copies, originals unchanged)[/dim]")
-
-    result = BackfillApplication.classify_only(
-        output_dir=output_dir,
-        wing=wing,
-        max_sessions=max_sessions,
-        preview=preview,
-    )
-    if result.is_left():
-        err = result.monoid[0]
-        if err:
-            msg = f"[red]Error: {err.message}[/red]"
-            if err.exception.is_just():
-                msg += f" (Exception: {err.exception.value})"
-            console.print(msg)
-        else:
-            console.print("[red]Error: Unknown error.[/red]")
-        raise typer.Exit(1)
+# classify command removed from CLI — internal-only for now.
+# Use BackfillApplication.classify_only() directly from code.
 
 
 @app.command("clean")
@@ -876,7 +836,7 @@ def test_cmd(
     args: str = typer.Argument(None, help="Extra arguments to pass to pytest"),
 ):
     """Run the test suite (uses uv run pytest in project root)."""
-    cmd = ["uv", "run", "pytest", "-v", "-n", "auto"]
+    cmd = ["uv", "run", "pytest", "-v"]
     if args:
         cmd.extend(args.split())
     result = subprocess.run(cmd)
