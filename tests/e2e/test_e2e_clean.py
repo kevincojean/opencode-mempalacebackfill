@@ -101,6 +101,58 @@ class TestCleanBasic:
             f"Expected error in stdout for file path, got: {result.stdout}"
         )
 
+    def test_given_sync_state_dir_when_clean_sync_state_then_removes_dir(self, tmp_output):
+        """
+        GIVEN a sync state directory with files
+        WHEN I run `clean --sync-state <dir>`
+        THEN the directory is removed.
+        """
+        sync_dir = Path(tmp_output, "sync_state")
+        sync_dir.mkdir()
+        Path(sync_dir, "state_alpha.json").write_text("{}")
+        Path(sync_dir, "state_beta.json").write_text("{}")
+
+        result = run_cli([
+            "clean",
+            "--output-dir", tmp_output,
+            "--sync-state", str(sync_dir),
+        ])
+        assert result.returncode == 0, f"Expected 0, got {result.returncode}: {result.stderr}"
+        assert not sync_dir.exists(), "Sync state dir should be removed"
+        assert "Removed sync state directory" in result.stdout
+
+    def test_given_sync_state_file_when_clean_sync_state_then_removes_file(self, tmp_output):
+        """
+        GIVEN a sync state file
+        WHEN I run `clean --sync-state <path>`
+        THEN the file is removed.
+        """
+        sync_file = Path(tmp_output, "sync_state_test.json")
+        sync_file.write_text('{"mined_files": {}}')
+
+        result = run_cli([
+            "clean",
+            "--output-dir", tmp_output,
+            "--sync-state", str(sync_file),
+        ])
+        assert result.returncode == 0, f"Expected 0, got {result.returncode}: {result.stderr}"
+        assert not sync_file.exists(), "Sync state file should be removed"
+        assert "Removed sync state file" in result.stdout
+
+    def test_given_nonexistent_sync_state_when_clean_sync_state_then_warns(self, tmp_output):
+        """
+        GIVEN a non-existent sync state path
+        WHEN I run `clean --sync-state /nonexistent`
+        THEN it prints a warning and exits 0.
+        """
+        result = run_cli([
+            "clean",
+            "--output-dir", tmp_output,
+            "--sync-state", "/nonexistent/sync_state_test",
+        ])
+        assert result.returncode == 0, f"Expected 0, got {result.returncode}: {result.stderr}"
+        assert "nothing to clean" in result.stdout.lower() or "does not exist" in result.stdout.lower()
+
     def test_given_state_file_only_when_clean_then_removes_state_and_reports(self, tmp_output):
         """
         GIVEN only a state file exists (no output directory)

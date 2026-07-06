@@ -521,3 +521,140 @@ class TestSyncWingMine:
         assert len(calls) == 2, (
             f"Expected 2 mine calls (one per wing), got {len(calls)}: {calls}"
         )
+
+
+class TestSyncDedup:
+    """Acceptance criteria: sync skips unchanged files on re-run using content hash tracking."""
+
+    def test_given_unchanged_files_when_sync_twice_then_second_run_mines_zero(
+        self, tmp_output,
+    ):
+        """
+        GIVEN 2 markdown files in the output directory
+        WHEN I run sync twice (with mock mempalace that records calls)
+        THEN the second run should mine 0 drawers
+        AND mock mempalace should only be called once (first run only).
+        """
+        Path(tmp_output, "session_001.md").write_text("# Session 1 Content")
+        Path(tmp_output, "session_002.md").write_text("# Session 2 Content")
+
+        call_log = os.path.join(tmp_output, "mempalace_calls.txt")
+
+        mock_body = (
+            f"#!/bin/sh\n"
+            f'echo "$(date): $*" >> {call_log}\n'
+            f'echo "2 drawers"\n'
+            f"exit 0\n"
+        )
+
+        with mock_mempalace_script(body=mock_body) as mock_cmd:
+            result1 = run_cli([
+                "sync",
+                "--output-dir", tmp_output,
+                "--mempalace-command", mock_cmd,
+            ])
+            assert result1.returncode == 0, (
+                f"First sync failed: {result1.stderr}"
+            )
+
+            result2 = run_cli([
+                "sync",
+                "--output-dir", tmp_output,
+                "--mempalace-command", mock_cmd,
+            ])
+            assert result2.returncode == 0, (
+                f"Second sync failed: {result2.stderr}"
+            )
+
+        if os.path.exists(call_log):
+            with open(call_log) as f:
+                calls = f.read().strip().split("\n")
+        else:
+            calls = []
+
+        # THIS IS THE KEY ASSERTION THAT FAILS BEFORE TASK 4 (DEDUP):
+        # Without dedup, mempalace is called twice (once per sync run).
+        # With dedup, mempalace is called only once (first run only).
+        assert len(calls) == 1, (
+            f"Expected mempalace to be called only once (first sync only), "
+            f"but it was called {len(calls)} time(s): {calls}. "
+            f"This is expected to FAIL until sync dedup is implemented."
+        )
+
+        assert "0 drawers" in result2.stdout or "0 draw" in result2.stdout, (
+            f"Expected second sync to show 0 drawers mined, stdout: {result2.stdout}"
+        )
+
+    def test_given_changed_files_when_sync_twice_then_second_run_mines_changed_only(
+        self, tmp_output,
+    ):
+        """
+        GIVEN 3 markdown files in the output directory
+        WHEN I run sync twice, modifying one file between runs
+        THEN the second run mines only the changed file (1 drawer instead of 3).
+        """
+        Path(tmp_output, "session_001.md").write_text("# Session 1 Content")
+        Path(tmp_output, "session_002.md").write_text("# Session 2 Content")
+        Path(tmp_output, "session_003.md").write_text("# Session 3 Content")
+
+        call_log = os.path.join(tmp_output, "mempalace_calls.txt")
+
+        mock_body = (
+            f"#!/bin/sh\n"
+            f'echo "$(date): $*" >> {call_log}\n'
+            f'echo "3 drawers"\n'
+            f"exit 0\n"
+        )
+
+        with mock_mempalace_script(body=mock_body) as mock_cmd:
+            first_result = run_cli([
+                "sync",
+                "--output-dir", tmp_output,
+                "--mempalace-command", mock_cmd,
+            ])
+            assert first_result.returncode == 0, (
+                f"First sync failed: {first_result.stderr}"
+            )
+
+        # Modify ONE file so its content hash changes
+        Path(tmp_output, "session_002.md").write_text(
+            "# Session 2 Modified Content\n\nThis content changed."
+        )
+
+        # Clear call log so we can count second-run calls independently
+        if os.path.exists(call_log):
+            os.remove(call_log)
+
+        mock_body2 = (
+            f"#!/bin/sh\n"
+            f'echo "$(date): $*" >> {call_log}\n'
+            f'echo "1 drawer"\n'
+            f"exit 0\n"
+        )
+
+        with mock_mempalace_script(body=mock_body2) as mock_cmd2:
+            second_result = run_cli([
+                "sync",
+                "--output-dir", tmp_output,
+                "--mempalace-command", mock_cmd2,
+            ])
+            assert second_result.returncode == 0, (
+                f"Second sync failed: {second_result.stderr}"
+            )
+
+        # Verify mempalace was called in the second run (the changed file)
+        if os.path.exists(call_log):
+            with open(call_log) as f:
+                second_calls = f.read().strip().split("\n")
+        else:
+            second_calls = []
+
+        assert len(second_calls) > 0, (
+            f"Expected mempalace to be called for the changed file, "
+            f"but no calls were recorded in {call_log}"
+        )
+
+        assert "1 drawer" in second_result.stdout, (
+            f"Expected second sync to mine 1 drawer, "
+            f"stdout: {second_result.stdout}"
+        )

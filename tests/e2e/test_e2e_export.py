@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from tests.e2e.helpers import run_cli
@@ -469,3 +470,49 @@ class TestExportWingAutoDetect:
         assert len(md_files) == 3, (
             f"Expected 3 sessions in wing_proj1, found {len(md_files)}"
         )
+
+
+class TestExportStateMigration:
+    def test_given_old_state_json_when_export_then_migrates_to_export_state_json(
+        self, fixture_db, tmp_output, tmp_state,
+    ):
+        """
+        GIVEN an old state.json file exists (but no export_state.json)
+        WHEN I run export --dry-run with --state-file pointing to export_state.json
+        THEN the old state.json is migrated to export_state.json
+        AND the old state.json is deleted.
+        """
+        state_dir = Path(tmp_state).parent
+        old_path = Path(tmp_state)
+        new_path = state_dir / "export_state.json"
+
+        old_data = {
+            "last_session_time": "2025-01-15T10:00:00",
+            "last_session_id": "sess_001",
+            "exported_session_ids": ["sess_001", "sess_002"],
+            "total_sessions_exported": 2,
+        }
+
+        with open(old_path, "w") as f:
+            json.dump(old_data, f)
+        assert old_path.exists()
+        assert not new_path.exists()
+
+        result = run_cli([
+            "export",
+            "--db-path", fixture_db,
+            "--since", "2025-01-01",
+            "--max-sessions", "1",
+            "--min-messages", "1",
+            "--dry-run",
+            "--output-dir", tmp_output,
+            "--state-file", str(new_path),
+        ])
+        assert result.returncode == 0, f"Export failed: {result.stderr}"
+
+        assert new_path.exists(), "export_state.json should exist after migration"
+        assert not old_path.exists(), "old state.json should be deleted after migration"
+
+        with open(new_path) as f:
+            migrated_data = json.load(f)
+        assert migrated_data == old_data, f"Migrated data mismatch: {migrated_data} != {old_data}"

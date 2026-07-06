@@ -6,6 +6,7 @@ import re
 import select
 import subprocess
 import tempfile
+import time
 from typing import final
 import inject
 from pymonad.either import Either, Left, Right
@@ -24,6 +25,12 @@ _LOCK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"is held by", re.IGNORECASE),
 ]
 
+# Retry configuration for lock contention with exponential backoff.
+# mempalace uses non-blocking flock (LOCK_EX | LOCK_NB), so the retry
+# must live on our side.  Delays: 5s, 15s, 45s (total worst-case ~65s).
+_LOCK_MAX_RETRIES = 3
+_LOCK_BASE_DELAY = 5  # seconds; multiplied by 3**attempt
+
 # If the mempalace process produces no output for this many seconds,
 # assume it is stuck or crashed and kill it. The mine can take several
 # minutes on a large export directory, but it should produce periodic
@@ -40,6 +47,21 @@ class MineLauncherService:
     @staticmethod
     def _check_lock_error(output: str) -> bool:
         return any(p.search(output) for p in _LOCK_PATTERNS)
+
+    @staticmethod
+    def _extract_holder_pid(output: str) -> int | None:
+        m = re.search(r"held by (?:PID\s+)?(\d+)", output, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        return None
+
+    @staticmethod
+    def _is_pid_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except (OSError, ProcessLookupError):
+            return False
+        return True
 
     def _repair_and_retry(
         self, base_cmd: str, palace_path: str | None, mine_cmd: list[str],
@@ -183,7 +205,28 @@ class MineLauncherService:
 
         try:
             cmd = self._build_command(export_dir, wing, extract_general)
-            return self._run_mine(cmd, base_cmd, palace_path, env=env)
+            last_result: Either[Error, int] | None = None
+            for attempt in range(_LOCK_MAX_RETRIES + 1):
+                result = self._run_mine(cmd, base_cmd, palace_path, env=env)
+                if result.is_right():
+                    return result
+                err_msg = str(result.monoid[0]) if result.is_left() else ""
+                if not MineLauncherService._check_lock_error(err_msg):
+                    return result
+                last_result = result
+                if attempt < _LOCK_MAX_RETRIES:
+                    delay = _LOCK_BASE_DELAY * (3 ** attempt)
+                    holder_pid = MineLauncherService._extract_holder_pid(err_msg)
+                    pid_info = ""
+                    if holder_pid is not None:
+                        status = "still running" if MineLauncherService._is_pid_alive(holder_pid) else "dead, stale lock?"
+                        pid_info = f" (holder PID {holder_pid} — {status})"
+                    logging.warning(
+                        "mempalace locked (attempt %d/%d)%s — retrying in %ds",
+                        attempt + 1, _LOCK_MAX_RETRIES + 1, pid_info, delay,
+                    )
+                    time.sleep(delay)
+            return last_result if last_result is not None else Left(Error("mempalace mine failed"))
         except FileNotFoundError:
             return Left(Error("mempalace not found in PATH"))
         except Exception as e:

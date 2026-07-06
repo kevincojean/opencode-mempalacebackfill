@@ -4,7 +4,8 @@ from typing import final, Any
 from mempalace_backfill.config_model import Config
 
 _DEFAULT_OUTPUT_DIR = str(Path.home() / ".local" / "share" / "com.kevincojean.opencode-mempalacebackfill" / "exports")
-_DEFAULT_STATE_FILE = str(Path.home() / ".local" / "share" / "com.kevincojean.opencode-mempalacebackfill" / "state.json")
+_DEFAULT_EXPORT_STATE_FILE = str(Path.home() / ".local" / "share" / "com.kevincojean.opencode-mempalacebackfill" / "export_state.json")
+_DEFAULT_SYNC_STATE_DIR = str(Path.home() / ".local" / "share" / "com.kevincojean.opencode-mempalacebackfill" / "sync_state")
 
 
 @final
@@ -41,7 +42,8 @@ class ConfigLoadService:
                 },
                 "source_dir": ".",
                 "patterns": ["*.log", "*.md"],
-                "state_file": _DEFAULT_STATE_FILE,
+                "export_state_file": _DEFAULT_EXPORT_STATE_FILE,
+                "sync_state_dir": _DEFAULT_SYNC_STATE_DIR,
                 "output_dir": _DEFAULT_OUTPUT_DIR,
             }
         }

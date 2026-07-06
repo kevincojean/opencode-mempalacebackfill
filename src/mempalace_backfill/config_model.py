@@ -25,7 +25,8 @@ class BackfillConfig(TypedDict):
     preclassification: PreclassificationConfig
     source_dir: str
     patterns: list[str]
-    state_file: str
+    export_state_file: str
+    sync_state_dir: NotRequired[str]
     output_dir: NotRequired[str]
 
 

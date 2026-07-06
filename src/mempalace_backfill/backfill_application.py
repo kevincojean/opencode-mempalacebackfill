@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ from mempalace_backfill.db.session_query_repository import SessionQueryRepositor
 from mempalace_backfill.db.message_query_repository import MessageQueryRepository
 from mempalace_backfill.export.content_normalization_service import ContentNormalizationService
 from mempalace_backfill.export.markdown_conversion_service import MarkdownConversionService
-from mempalace_backfill.state.state_file_repository import StateFileRepository
+from mempalace_backfill.state.state_file_repository import ExportStateFileRepository, MineStateFileRepository, MineState
 from mempalace_backfill.mempalace.mine_launcher_service import MineLauncherService
 from mempalace_backfill.classify.classify_pipeline import ClassifyPipeline
 from mempalace_backfill.classify.regex_classifier import RegexClassifier
@@ -193,18 +194,23 @@ app = typer.Typer(add_completion=False)
 
 
 @contextmanager
-def _managed_mine_source(output_dir: str, max_sessions: int | None, force_temp: bool = False) -> Iterator[str]:
-    """Yield a directory to mine from, creating a temp subset when max_sessions is set
-    or force_temp is True.
+def _managed_mine_source(output_dir: str, max_sessions: int | None, force_temp: bool = False, include_paths: set[str] | None = None) -> Iterator[str]:
+    """Yield a directory to mine from, creating a temp subset when max_sessions, force_temp,
+    or include_paths is set.
 
     When max_sessions is specified or force_temp is True, copies the markdown files from the
     output directory (including any wing subdirectory structure) into a temporary
     subdirectory inside the output directory, preserving relative paths.
     If max_sessions is set, only the first N files are copied.
+
+    When include_paths is set, only files whose relative path (from output_dir) is in the
+    set are copied to the temp dir.  Forces a temp dir even when max_sessions is None.
+
     The temp directory is cleaned up on completion, error, or interrupt via the
     context manager's finally block.
     """
-    if max_sessions is None and not force_temp:
+    actual_force_temp = force_temp or include_paths is not None
+    if max_sessions is None and not actual_force_temp:
         yield output_dir
         return
 
@@ -214,9 +220,11 @@ def _managed_mine_source(output_dir: str, max_sessions: int | None, force_temp: 
         md_files = sorted(Path(output_dir).rglob("*.md"))
         copied = 0
         for f in md_files:
+            rel = str(f.relative_to(output_dir))
+            if include_paths is not None and rel not in include_paths:
+                continue
             if max_sessions is not None and copied >= max_sessions:
                 break
-            rel = f.relative_to(output_dir)
             dest = tmp_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(f), str(dest))
@@ -262,7 +270,7 @@ class BackfillApplication:
         binder.bind_to_constructor(MessageQueryRepository, MessageQueryRepository)
         binder.bind_to_constructor(ContentNormalizationService, ContentNormalizationService)
         binder.bind_to_constructor(MarkdownConversionService, MarkdownConversionService)
-        binder.bind_to_constructor(StateFileRepository, StateFileRepository)
+        binder.bind_to_constructor(ExportStateFileRepository, ExportStateFileRepository)
         binder.bind_to_constructor(MineLauncherService, MineLauncherService)
 
         # Classification
@@ -288,7 +296,7 @@ class BackfillApplication:
         if cli_args.get("wing"):
             mempalace_config["wing"] = cli_args["wing"]
         if cli_args.get("state_file"):
-            backfill_config["state_file"] = cli_args["state_file"]
+            backfill_config["export_state_file"] = cli_args["state_file"]
         if cli_args.get("output_dir"):
             backfill_config["output_dir"] = cli_args["output_dir"]
         if cli_args.get("source_dir"):
@@ -342,7 +350,7 @@ class BackfillApplication:
             config_svc.load_config(overrides)
 
             repo = inject.instance(SessionQueryRepository)
-            state_repo = inject.instance(StateFileRepository)
+            state_repo = inject.instance(ExportStateFileRepository)
             svc = inject.instance(MarkdownConversionService)
 
             state_result = state_repo.load()
@@ -517,11 +525,48 @@ class BackfillApplication:
                             len(modified_files),
                         )
 
-                # ── Step 2: Delete stale palace drawers for modified files ──
+                # ── Step 2: Mine State — track hashes for dedup ─────────────
+                mine_state_repo = MineStateFileRepository(inject.instance(ConfigLoadService), w, source_dir=source)
+                mine_state_result = mine_state_repo.load()
+                mine_state = mine_state_result.value if mine_state_result.is_right() else MineState()
+
+                # Compute content hashes for all .md files (after pre-classification)
+                md_source_files = sorted(
+                    p for p in Path(source).rglob("*.md")
+                    if ".tmp_sync_" not in p.parts
+                )
+                files_to_mine: set[str] = set()
+                for f in md_source_files:
+                    rel_path = str(f.relative_to(Path(source)))
+                    content_hash = hashlib.sha256(f.read_bytes()).hexdigest()
+                    if not mine_state.is_mined(rel_path, content_hash):
+                        files_to_mine.add(rel_path)
+
+                # If all files already mined, skip this wing entirely
+                if not files_to_mine and mine_state.mined_files:
+                    logging.info(
+                        "Wing '%s': all %d files already mined, skipping",
+                        w, len(md_source_files),
+                    )
+                    console.print(f"[dim]Wing '{w}': all files already mined, skipped.[/dim]")
+                    continue
+
+                logging.info(
+                    "Wing '%s': skipping %d files (already mined), mining %d new/changed files",
+                    w, len(md_source_files) - len(files_to_mine), len(files_to_mine),
+                )
+
+                # Only filter when we have a proper subset (some files already mined)
+                if len(files_to_mine) == len(md_source_files) or not mine_state.mined_files:
+                    include_paths: set[str] | None = None  # all files need mining, no filter
+                else:
+                    include_paths = files_to_mine
+
+                # ── Step 3: Delete stale palace drawers for modified files ──
                 # Only delete when NOT using a temp dir for mining (temp dirs
                 # create different source_file paths that don't match the
                 # original paths stored in the palace).
-                if modified_files and not dry_run and max_sessions is None:
+                if modified_files and not dry_run and max_sessions is None and not include_paths:
                     logging.info(
                         "Deleting stale palace drawers for %d modified file(s)",
                         len(modified_files),
@@ -535,17 +580,14 @@ class BackfillApplication:
                             delete_result.value,
                         )
 
-                # ── Step 3: Mine ──────────────────────────────────────────
-                # When max_sessions is set, use a temp dir (old behavior:
-                # copy + classify + mine on subset).  The classification
-                # above already modified originals, so the temp copy picks
-                # up classified files.  Stale-drawer deletion is skipped
-                # for the temp-dir case because temp paths are ephemeral.
-                # When no max_sessions, mine the original dir directly so
-                # mempalace sees the same source_file paths and can
-                # skip-unchanged / re-mine only deleted drawers.
-                use_temp = max_sessions is not None
-                with _managed_mine_source(source, max_sessions, force_temp=use_temp) as source_dir:
+                # ── Step 4: Mine ──────────────────────────────────────────
+                # When max_sessions or include_paths is set, use a temp dir.
+                # The classification above already modified originals, so
+                # the temp copy picks up classified files.  Stale-drawer
+                # deletion is skipped for the temp-dir case because temp
+                # paths are ephemeral.
+                use_temp = max_sessions is not None or include_paths is not None
+                with _managed_mine_source(source, max_sessions, force_temp=use_temp, include_paths=include_paths) as source_dir:
                     logging.info("Starting mempalace mine: wing=%s, dir=%s", w, source_dir)
                     launch_result = launcher.launch(
                         source_dir, w, dry_run,
@@ -559,6 +601,20 @@ class BackfillApplication:
                         num_str = f"{mined} drawer{'s' if mined != 1 else ''}"
                         console.print(f"[green]Mined {num_str} into wing '{w}'.[/green]")
                         logging.info("Mine complete: %d drawers into wing '%s'", mined, w)
+
+                    # ── Step 5: Save updated mine state ────────────────────
+                    if not dry_run and launch_result.is_right():
+                        updated_state = mine_state
+                        if include_paths is not None:
+                            newly_mined = files_to_mine
+                        else:
+                            newly_mined = {str(f.relative_to(Path(source))) for f in md_source_files}
+                        for file_rel_path in newly_mined:
+                            md_path = Path(source) / file_rel_path
+                            if md_path.exists():
+                                hash_val = hashlib.sha256(md_path.read_bytes()).hexdigest()
+                                updated_state = updated_state.mark_mined(file_rel_path, hash_val)
+                        mine_state_repo.save(updated_state)
 
             if not dry_run:
                 total_str = f"{total_mined} drawer{'s' if total_mined != 1 else ''}"
@@ -690,8 +746,21 @@ class BackfillApplication:
     def clean(
         output_dir: str = _DEFAULT_EXPORT_DIR,
         state_file: str = _DEFAULT_STATE_FILE,
+        sync_state: str | None = None,
     ) -> Either[Error, int]:
         from mempalace_backfill.clean_service import CleanService
+
+        if sync_state:
+            sync_path = Path(sync_state)
+            if not sync_path.exists():
+                console.print(f"[yellow]Warning: sync state path '{sync_state}' does not exist — nothing to clean.[/yellow]")
+            else:
+                if sync_path.is_dir():
+                    shutil.rmtree(str(sync_path))
+                    console.print(f"[green]Removed sync state directory: {sync_state}[/green]")
+                else:
+                    sync_path.unlink()
+                    console.print(f"[green]Removed sync state file: {sync_state}[/green]")
 
         output_path = Path(output_dir)
         state_path = Path(state_file)
@@ -702,7 +771,7 @@ class BackfillApplication:
 
         if result.is_right():
             count = result.value
-            if not dir_exists and not state_existed:
+            if not dir_exists and not state_existed and not sync_state:
                 console.print("[yellow]Nothing to clean. Output directory and state file do not exist.[/yellow]")
             else:
                 status = f"output directory ({count} items removed)"
@@ -808,6 +877,7 @@ def sync_cmd(
 def clean_cmd(
     output_dir: str | None = typer.Option(None, "--output-dir", help="Output directory to clean (default: <project-root>/target/exports)"),
     state_file: str | None = typer.Option(None, "--state-file", help="State file to remove (default: <project-root>/target/state.json)"),
+    sync_state: str | None = typer.Option(None, "--sync-state", "-ss", help="Path to sync state directory or file to remove"),
 ):
     """Remove all contents from the output directory and reset the export state."""
     if output_dir is None:
@@ -818,6 +888,7 @@ def clean_cmd(
     result = BackfillApplication.clean(
         output_dir=output_dir,
         state_file=state_file,
+        sync_state=sync_state,
     )
     if result.is_left():
         err = result.monoid[0]
