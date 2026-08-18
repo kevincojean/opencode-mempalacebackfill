@@ -658,3 +658,114 @@ class TestSyncDedup:
             f"Expected second sync to mine 1 drawer, "
             f"stdout: {second_result.stdout}"
         )
+
+
+class TestSyncRepairGate:
+    """Acceptance criteria: from-sqlite repair gated to Chroma backends.
+
+    Upstream ``mempalace/cli.py:1785`` (``_maintenance_requires_chroma``)
+    refuses ``mempalace repair --mode from-sqlite --archive-existing`` on
+    non-Chroma backends.  Both call sites (``_repair_palace`` in
+    backfill_application and ``_repair_and_retry`` in mine_launcher_service)
+    must short-circuit when the resolved backend is not ``chroma``.
+    """
+
+    @staticmethod
+    def _segfault_mock(call_log: str) -> str:
+        """Mock: first ``mine`` call segfaults, subsequent ones succeed.
+
+        Without this guard the chroma test would loop forever
+        (``mine`` -> repair -> ``mine`` -> repair -> ...) because the
+        post-repair retry also segfaults and there is no recursion cap
+        on the repair-and-retry path.
+        """
+        return (
+            "#!/bin/sh\n"
+            f"echo \"$@\" >> {call_log}\n"
+            'case "$1" in\n'
+            "  mine)\n"
+            f"    mine_count=$(grep -c '^mine' {call_log} 2>/dev/null || echo 0)\n"
+            '    if [ "$mine_count" = "1" ]; then\n'
+            "      kill -11 $$\n"
+            "    fi\n"
+            "    exit 0\n"
+            "    ;;\n"
+            "  *) exit 0 ;;\n"
+            "esac\n"
+        )
+
+    def test_given_chroma_sigsegv_when_sync_then_invokes_from_sqlite_repair(
+        self, tmp_output,
+    ):
+        """
+        GIVEN --backend chroma and a mock mempalace that segfaults on mine
+        WHEN I run sync
+        THEN the ``repair --mode from-sqlite`` subprocess is invoked exactly once.
+        """
+        Path(tmp_output, "session_001.md").write_text("# Session 1")
+        call_log = os.path.join(tmp_output, "calls.log")
+
+        with mock_mempalace_script(
+            body=TestSyncRepairGate._segfault_mock(call_log),
+        ) as mock_cmd:
+            run_cli([
+                "sync",
+                "--output-dir", tmp_output,
+                "--mempalace-command", mock_cmd,
+                "--backend", "chroma",
+            ])
+
+        with open(call_log) as f:
+            calls = f.read()
+
+        assert "from-sqlite" in calls, (
+            f"Expected 'from-sqlite' in subprocess call log, got: {calls!r}"
+        )
+        repair_calls = [
+            line for line in calls.splitlines()
+            if line.startswith("repair")
+        ]
+        assert len(repair_calls) == 1, (
+            f"Expected exactly 1 repair call, got {len(repair_calls)}: {repair_calls}"
+        )
+        assert "from-sqlite" in repair_calls[0], (
+            f"Expected from-sqlite in repair call, got: {repair_calls[0]!r}"
+        )
+
+    def test_given_qdrant_sigsegv_when_sync_then_skips_from_sqlite_repair(
+        self, tmp_output,
+    ):
+        """
+        GIVEN --backend qdrant and a mock mempalace that segfaults on mine
+        WHEN I run sync
+        THEN no ``repair --mode from-sqlite`` subprocess is launched
+        AND the original SIGSEGV error is preserved in the CLI output.
+        """
+        Path(tmp_output, "session_001.md").write_text("# Session 1")
+        call_log = os.path.join(tmp_output, "calls.log")
+
+        with mock_mempalace_script(
+            body=TestSyncRepairGate._segfault_mock(call_log),
+        ) as mock_cmd:
+            result = run_cli([
+                "sync",
+                "--output-dir", tmp_output,
+                "--mempalace-command", mock_cmd,
+                "--backend", "qdrant",
+            ])
+
+        with open(call_log) as f:
+            calls = f.read()
+
+        assert "repair" not in calls, (
+            f"Expected NO 'repair' in call log (gate should skip), got: {calls!r}"
+        )
+        assert "from-sqlite" not in calls, (
+            f"Expected NO 'from-sqlite' in call log (gate should skip), got: {calls!r}"
+        )
+        assert result.returncode != 0, (
+            f"Expected non-zero exit code (mine failed), got 0"
+        )
+        assert "SIGSEGV" in result.stdout or "exit code -11" in result.stdout, (
+            f"Expected SIGSEGV error preserved in CLI output, got: {result.stdout!r}"
+        )

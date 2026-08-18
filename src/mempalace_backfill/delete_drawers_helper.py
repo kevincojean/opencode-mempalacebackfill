@@ -1,8 +1,9 @@
 """
-Standalone helper to delete MemPalace drawers by source_file via ChromaDB.
+Standalone helper to delete MemPalace drawers by source_file via the
+backend-neutral public API.
 
-Invoked as a subprocess so that a ChromaDB segfault (HNSW segment writer)
-does not kill the parent process.
+Invoked as a subprocess so that a backend segfault (e.g. ChromaDB HNSW
+segment writer) does not kill the parent process.
 
 Usage::
 
@@ -13,101 +14,107 @@ Input JSON (via argv)::
     {
         "palace_path": "/path/to/palace",
         "source_files": ["/path/to/file1.md", "/path/to/file2.md"],
-        "extract_mode": "exchange"
+        "extract_mode": "general",
+        "backend_hint": "chroma"
     }
 
-Output JSON (stdout) — success::
+``extract_mode`` defaults to ``"general"``; non-classified sync callers
+MUST pass ``"exchange"`` explicitly so stale orphans are not created.
 
-    {"status": "ok", "deleted": 5}
+Output (stdout) - success::
 
-Output JSON (stdout) — error::
+    OK: deleted N drawers
 
-    {"status": "error", "message": "human-readable reason"}
+Output (stderr) - errors::
+
+    Error: palace not initialized: /path/to/palace   (exit code 2)
+    Error: <repr(exception)>                          (exit code 1)
 """
 
+from __future__ import annotations
+
 import json
+import logging
 import sys
-from typing import Any
+from typing import Any, Optional
 
 
 def _run() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.info("delete_drawers_helper: starting")
+
     if len(sys.argv) < 2:
-        print(json.dumps({"status": "error", "message": "Missing JSON args argument"}))
+        print("Error: missing JSON args argument", file=sys.stderr)
         sys.exit(1)
 
     try:
         args: dict[str, Any] = json.loads(sys.argv[1])
-    except json.JSONDecodeError as e:
-        print(json.dumps({"status": "error", "message": f"Invalid JSON args: {e}"}))
+    except json.JSONDecodeError as exc:
+        print(f"Error: invalid JSON args: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    palace_path = args.get("palace_path")
+    palace_path: Optional[str] = args.get("palace_path")
     source_files: list[str] = args.get("source_files", [])
-    extract_mode: str | None = args.get("extract_mode", "exchange")
+    extract_mode: str = args.get("extract_mode", "general")
+    backend_hint: Optional[str] = args.get("backend_hint")
 
     if not palace_path:
-        print(json.dumps({"status": "error", "message": "Missing palace_path"}))
+        print("Error: missing palace_path", file=sys.stderr)
         sys.exit(1)
 
     if not source_files:
-        print(json.dumps({"status": "ok", "deleted": 0}))
+        print("OK: deleted 0 drawers")
+        logging.info("delete_drawers_helper: nothing to delete, exiting")
         return
 
     try:
-        import chromadb
-        from chromadb.config import Settings as ChromaSettings
-    except ImportError:
-        print(json.dumps({"status": "error", "message": "chromadb not available"}))
+        from mempalace.backends.base import CollectionNotInitializedError, BaseCollection
+        from mempalace.palace import get_collection
+    except ImportError as exc:
+        print(f"Error: mempalace not available: {exc}", file=sys.stderr)
         sys.exit(1)
 
     try:
-        from pathlib import Path
-        db_path = Path(palace_path)
-        if not db_path.is_dir():
-            print(json.dumps({"status": "error", "message": f"Palace directory not found: {palace_path}"}))
+        collection: BaseCollection = get_collection(
+            palace_path,
+            create=False,
+            backend=backend_hint,
+        )
+    except CollectionNotInitializedError:
+        print(f"Error: palace not initialized: {palace_path}", file=sys.stderr)
+        logging.info("delete_drawers_helper: palace not initialized, exiting")
+        sys.exit(2)
+    except FileNotFoundError as exc:
+        # CollectionNotInitializedError subclasses FileNotFoundError; some
+        # backends raise the parent directly when the palace dir/db is gone.
+        print(f"Error: palace not initialized: {palace_path} ({exc})", file=sys.stderr)
+        logging.info("delete_drawers_helper: palace not initialized, exiting")
+        sys.exit(2)
+    except Exception as exc:
+        print(f"Error: {exc!r}", file=sys.stderr)
+        sys.exit(1)
+
+    where: dict[str, Any] = {
+        "source_file": {"$in": source_files},
+        "extract_mode": extract_mode,
+    }
+
+    try:
+        result = collection.get(where=where)
+    except Exception as exc:
+        print(f"Error: {exc!r}", file=sys.stderr)
+        sys.exit(1)
+
+    ids: list[str] = list(getattr(result, "ids", []) or [])
+    if ids:
+        try:
+            collection.delete(ids=ids)
+        except Exception as exc:
+            print(f"Error: {exc!r}", file=sys.stderr)
             sys.exit(1)
 
-        client = chromadb.PersistentClient(
-            path=str(db_path),
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
-
-        try:
-            collection = client.get_collection("mempalace_drawers")
-        except ValueError:
-            print(json.dumps({"status": "ok", "deleted": 0}))
-            return
-
-        total_deleted = 0
-        failures: list[str] = []
-        for src in source_files:
-            try:
-                if extract_mode is not None:
-                    where: dict[str, Any] = {
-                        "$and": [
-                            {"source_file": src},
-                            {"extract_mode": extract_mode},
-                        ]
-                    }
-                else:
-                    where = {"source_file": src}
-
-                result = collection.get(where=where, include=[])
-                ids = result.get("ids", [])
-                if ids:
-                    collection.delete(ids=ids)
-                    total_deleted += len(ids)
-            except Exception as e:
-                failures.append(f"{src}: {e}")
-
-        if failures:
-            print(json.dumps({"status": "partial", "deleted": total_deleted, "failed": failures}))
-        else:
-            print(json.dumps({"status": "ok", "deleted": total_deleted}))
-
-    except Exception as e:
-        print(json.dumps({"status": "error", "message": str(e)}))
-        sys.exit(1)
+    print(f"OK: deleted {len(ids)} drawers")
+    logging.info("delete_drawers_helper: deleted %d drawer(s), exiting", len(ids))
 
 
 if __name__ == "__main__":

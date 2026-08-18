@@ -14,6 +14,7 @@ from pymonad.maybe import Just, Nothing
 
 from mempalace_backfill.alias import Error
 from mempalace_backfill.config_load_service import ConfigLoadService
+from mempalace_backfill.mempalace.backend_resolver import BackendResolver
 
 _LOCK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"database is locked", re.IGNORECASE),
@@ -23,6 +24,19 @@ _LOCK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"resource temporarily unavailable", re.IGNORECASE),
     re.compile(r"timeout", re.IGNORECASE),
     re.compile(r"is held by", re.IGNORECASE),
+]
+
+# Qdrant errors are config-level (server not running, 5xx overload), not transient.
+# A retry loop would just delay the same failure; fail fast with a clear error.
+# Ordered most-specific first: "Qdrant" contextualises any Qdrant error, "connection refused"
+# beats "HTTP 5" so we don't double-classify, and bare "503"/"502" catch substrings
+# like "503 Service Unavailable" / "502 Bad Gateway".
+_QDRANT_ERROR_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"qdrant", re.IGNORECASE),
+    re.compile(r"connection refused", re.IGNORECASE),
+    re.compile(r"http 5", re.IGNORECASE),
+    re.compile(r"503", re.IGNORECASE),
+    re.compile(r"502", re.IGNORECASE),
 ]
 
 # Retry configuration for lock contention with exponential backoff.
@@ -49,6 +63,10 @@ class MineLauncherService:
         return any(p.search(output) for p in _LOCK_PATTERNS)
 
     @staticmethod
+    def _check_qdrant_error(output: str) -> bool:
+        return any(p.search(output) for p in _QDRANT_ERROR_PATTERNS)
+
+    @staticmethod
     def _extract_holder_pid(output: str) -> int | None:
         m = re.search(r"held by (?:PID\s+)?(\d+)", output, re.IGNORECASE)
         if m:
@@ -66,8 +84,52 @@ class MineLauncherService:
     def _repair_and_retry(
         self, base_cmd: str, palace_path: str | None, mine_cmd: list[str],
         env: dict[str, str] | None = None,
+        backend_hint_override: str | None = None,
+        original_error: Error | None = None,
     ) -> Either[Error, int]:
-        """Attempt palace repair after SIGSEGV and retry the mine once."""
+        """Attempt palace repair after SIGSEGV and retry the mine once.
+
+        Upstream MemPalace ``cli.py:1785`` (``_maintenance_requires_chroma``)
+        refuses ``mempalace repair --mode from-sqlite --archive-existing`` on
+        any backend other than ``chroma`` - that mode reads
+        ``chroma.sqlite3`` directly and is meaningless for Qdrant/Milvus.
+        We therefore re-resolve the effective backend here and short-circuit
+        when it is not ``chroma``.  The original SIGSEGV error from the first
+        mine attempt is propagated so the caller sees the real failure, not a
+        fabricated "skipped" message.
+        """
+        effective_palace_path = palace_path or ""
+        resolution = BackendResolver().resolve(
+            effective_palace_path, backend_hint_override,
+        )
+        if resolution.is_right():
+            backend = resolution.value
+            gate_skipped = backend != "chroma"
+        elif backend_hint_override is not None:
+            gate_skipped = True
+            backend = backend_hint_override
+        else:
+            backend = "chroma"
+            gate_skipped = False
+
+        if gate_skipped:
+            logging.warning(
+                "Skipping mempalace repair --mode from-sqlite for non-Chroma backend '%s' "
+                "(upstream gate refuses ChromaDB SQLite recovery on Qdrant/Milvus/etc.)",
+                backend,
+                extra={
+                    "backend": backend,
+                    "palace_path": palace_path,
+                    "skipped_reason": "from-sqlite only valid for chroma backend",
+                },
+            )
+            if original_error is not None:
+                return Left(original_error)
+            return Left(Error(
+                f"mempalace mine failed with exit code -11 (SIGSEGV) "
+                f"and palace repair skipped (backend='{backend}')"
+            ))
+
         repair_cmd = [base_cmd, "repair", "--mode", "from-sqlite", "--yes", "--archive-existing"]
         if palace_path:
             repair_cmd.extend(["--palace", palace_path])
@@ -84,10 +146,18 @@ class MineLauncherService:
                 f"(exit {repair_proc.returncode}): {repair_proc.stderr or repair_proc.stdout}"
             ))
 
-        logging.info("Palace repair succeeded — retrying mine")
-        return self._run_mine(mine_cmd, base_cmd, palace_path, env=env)
+        logging.info("Palace repair succeeded - retrying mine")
+        return self._run_mine(
+            mine_cmd, base_cmd, palace_path,
+            env=env, backend_hint_override=backend_hint_override,
+        )
 
-    def _run_mine(self, cmd: list[str], base_cmd: str = "mempalace", palace_path: str | None = None, env: dict[str, str] | None = None) -> Either[Error, int]:
+    def _run_mine(
+        self, cmd: list[str], base_cmd: str = "mempalace",
+        palace_path: str | None = None,
+        env: dict[str, str] | None = None,
+        backend_hint_override: str | None = None,
+    ) -> Either[Error, int]:
         """Run a single mine subprocess and return the result."""
         logging.info("Starting mempalace mine: %s", " ".join(cmd))
 
@@ -149,7 +219,15 @@ class MineLauncherService:
 
         if process.returncode != 0:
             if process.returncode == -11:
-                return self._repair_and_retry(base_cmd, palace_path, cmd, env=env)
+                original_error = Error(
+                    f"mempalace mine failed with exit code -11 (SIGSEGV): {combined_output}"
+                )
+                return self._repair_and_retry(
+                    base_cmd, palace_path, cmd,
+                    env=env,
+                    backend_hint_override=backend_hint_override,
+                    original_error=original_error,
+                )
             if MineLauncherService._check_lock_error(combined_output):
                 return Left(Error(
                     f"mempalace is locked: {combined_output}"
@@ -164,7 +242,14 @@ class MineLauncherService:
 
         return Right(0)
 
-    def launch(self, export_dir: str, wing: str, dry_run: bool = False, extract_general: bool = False) -> Either[Error, int]:
+    def launch(
+        self,
+        export_dir: str,
+        wing: str,
+        dry_run: bool = False,
+        extract_general: bool = False,
+        backend: str | None = None,
+    ) -> Either[Error, int]:
         if dry_run:
             cmd = self._build_command(export_dir, wing, extract_general)
             print(f"[DRY-RUN] Command: {' '.join(cmd)}")
@@ -203,11 +288,42 @@ class MineLauncherService:
         except (AttributeError, KeyError, OSError) as e:
             logging.warning("Could not export custom patterns to mempalace: %s", e)
 
+        # Propagate backend override to the mempalace subprocess as both
+        # MEMPALACE_BACKEND_EXPLICIT (highest-priority explicit override, RFC 001 §3.3)
+        # and MEMPALACE_BACKEND (fallback for older MemPalace versions that only
+        # honour the plain env var). Setting both is safe; the explicit one wins.
+        if backend is not None:
+            env = (env if env is not None else os.environ.copy())
+            env["MEMPALACE_BACKEND_EXPLICIT"] = backend
+            env["MEMPALACE_BACKEND"] = backend
+
         try:
             cmd = self._build_command(export_dir, wing, extract_general)
+
+            # Qdrant errors are config-level (server not running, 5xx overload), not transient.
+            # Skip the lock-retry loop entirely: single attempt, fail fast on Qdrant signature.
+            # backend is None / "" / "chroma" -> fall through to existing Chroma retry path.
+            if backend == "qdrant":
+                result = self._run_mine(
+                    cmd, base_cmd, palace_path, env=env,
+                    backend_hint_override=backend,
+                )
+                if result.is_left():
+                    err_msg = str(result.monoid[0])
+                    if MineLauncherService._check_qdrant_error(err_msg):
+                        logging.warning(
+                            "mempalace failed for Qdrant backend; no retry "
+                            "(connection-refused/5xx are config-level, not transient)"
+                        )
+                        return Left(Error(err_msg))
+                return result
+
             last_result: Either[Error, int] | None = None
             for attempt in range(_LOCK_MAX_RETRIES + 1):
-                result = self._run_mine(cmd, base_cmd, palace_path, env=env)
+                result = self._run_mine(
+                    cmd, base_cmd, palace_path, env=env,
+                    backend_hint_override=backend,
+                )
                 if result.is_right():
                     return result
                 err_msg = str(result.monoid[0]) if result.is_left() else ""

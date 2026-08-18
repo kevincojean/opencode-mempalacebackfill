@@ -4,19 +4,30 @@ dynamic = ["version"]
 description = "Backfill historical OpenCode sessions into MemPalace"
 requires-python = ">=3.10"
 dependencies = [
-    "chromadb==1.5.8",
     "inject==5.3.0",
     "pymonad==2.4.0",
     "rich==15.0.0",
     "typer==0.24.2",
     "typing-extensions==4.15.0",
+    # mempalace is required for backend resolution (BackendResolver) and
+    # direct mempalace.palace API calls in the sync code path. Without it
+    # importing mempalace_backfill fails (mempalace.backends, mempalace.palace).
+    "mempalace==3.7.1",
 ]
 
 [project.optional-dependencies]
 test = ["pytest==8.0.0", "pytest-xdist==3.8.0"]
+chroma = ["chromadb==1.5.8"]
+qdrant = []
 
 [dependency-groups]
-test = ["pytest==8.0.0", "pytest-xdist==3.8.0"]
+test = [
+    "pytest==8.0.0",
+    "pytest-xdist==3.8.0",
+    "qdrant-client==1.12.0",
+    "testcontainers[qdrant]==4.8.0",
+    "mempalace==3.7.1",
+]
 
 [project.scripts]
 mempalace-backfill = "mempalace_backfill.backfill_application:app"
@@ -30,3 +41,8 @@ version_scheme = "no-guess-dev"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+markers = ["qdrant: marks tests as requiring a real Qdrant container (integration tests, requires Docker)"]
+addopts = "--strict-markers"
+testpaths = ["tests"]

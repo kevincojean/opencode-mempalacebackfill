@@ -23,6 +23,12 @@ from mempalace_backfill.export.content_normalization_service import ContentNorma
 from mempalace_backfill.export.markdown_conversion_service import MarkdownConversionService
 from mempalace_backfill.state.state_file_repository import ExportStateFileRepository, MineStateFileRepository, MineState
 from mempalace_backfill.mempalace.mine_launcher_service import MineLauncherService
+from mempalace_backfill.mempalace.backend_resolver import BackendResolver
+from mempalace_backfill.mempalace.backend_resolver import (
+    BackendResolver,
+    BackendResolverError,
+    _SUPPORTED_BACKENDS,
+)
 from mempalace_backfill.classify.classify_pipeline import ClassifyPipeline
 from mempalace_backfill.classify.regex_classifier import RegexClassifier
 
@@ -32,6 +38,29 @@ _DEFAULT_STATE_FILE = str(_XDG_DATA_HOME / "state.json")
 _DEFAULT_PALACE_DIR = str(Path.home() / ".mempalace" / "palace")
 
 console = Console()
+
+
+def _validate_backend_cli(backend: str | None) -> str | None:
+    """Validate the ``--backend`` CLI option at the command edge.
+
+    Returns the value unchanged when it is None (auto-detect) or when it
+    is in the supported-backend set. Raises ``typer.BadParameter`` for
+    any other value so the user sees a clean error before any subprocess
+    is spawned.
+
+    The membership check is against ``_SUPPORTED_BACKENDS`` exported by
+    :mod:`mempalace_backfill.mempalace.backend_resolver` (T1's canonical
+    allowed-values frozenset) - keeps the contract in one place.
+    """
+    if backend is None:
+        return None
+    if backend not in _SUPPORTED_BACKENDS:
+        allowed = ", ".join(sorted(_SUPPORTED_BACKENDS))
+        raise typer.BadParameter(
+            f"unsupported backend '{backend}'; allowed values: {allowed}",
+            param_hint="--backend",
+        )
+    return backend
 
 
 def _resolve_palace_path(config: dict, cli_palace_path: str | None) -> str:
@@ -52,12 +81,16 @@ def _run_delete_drawers_subprocess(
     palace_path: str,
     source_files: set[str],
     extract_mode: str | None = "exchange",
+    backend_hint: str | None = None,
 ) -> Either[Error, int]:
     """Run drawer deletion in a subprocess to isolate ChromaDB segfaults.
 
     ChromaDB 1.5.8 (used by MemPalace 3.4.0) can segfault in the HNSW
     segment writer during ``collection.delete()``.  Running it in a
     subprocess prevents the segfault from killing the main process.
+
+    ``backend_hint`` is forwarded to the helper subprocess so it can
+    select the right MemPalace collection backend (chroma vs qdrant).
 
     Returns:
         Right with count of deleted drawers (0 if nothing to delete),
@@ -68,13 +101,14 @@ def _run_delete_drawers_subprocess(
 
     helper_path = Path(__file__).parent / "delete_drawers_helper.py"
     if not helper_path.is_file():
-        logging.warning("Deletion helper not found at %s — skipping deletion", helper_path)
+        logging.warning("Deletion helper not found at %s - skipping deletion", helper_path)
         return Right(0)
 
     args = {
         "palace_path": palace_path,
         "source_files": sorted(source_files),
         "extract_mode": extract_mode,
+        "backend_hint": backend_hint,
     }
 
     try:
@@ -124,16 +158,60 @@ def _run_delete_drawers_subprocess(
     return Right(deleted)
 
 
-def _repair_palace(palace_path: str) -> Either[Error, str]:
+def _repair_palace(
+    palace_path: str,
+    backend_hint: str | None = None,
+    original_error: Error | None = None,
+) -> Either[Error, str]:
     """Rebuild the palace vector index using ``mempalace repair --mode from-sqlite``.
 
     This bypasses the ChromaDB client entirely, reading rows directly from
     ``chroma.sqlite3``, and is the safest recovery path after an HNSW
     segfault.
 
+    Upstream MemPalace ``cli.py:1785`` (``_maintenance_requires_chroma``)
+    refuses ``mempalace repair --mode from-sqlite --archive-existing`` on
+    any backend other than ``chroma`` - that mode reads ``chroma.sqlite3``
+    directly and is meaningless for Qdrant/Milvus.  When the resolved
+    backend is not ``chroma``, the gate skips repair and re-raises the
+    original deletion-segfault error so the caller sees the real failure,
+    not a fabricated "skipped" message.
+
     Returns:
-        Right with repair output, or Left on failure.
+        Right with repair output, or Left on failure (or gate skip).
     """
+    effective_palace_path = palace_path or ""
+    resolution = BackendResolver().resolve(
+        effective_palace_path, backend_hint,
+    )
+    if resolution.is_right():
+        backend = resolution.value
+        gate_skipped = backend != "chroma"
+    elif backend_hint is not None:
+        gate_skipped = True
+        backend = backend_hint
+    else:
+        backend = "chroma"
+        gate_skipped = False
+
+    if gate_skipped:
+        logging.warning(
+            "Skipping mempalace repair --mode from-sqlite for non-Chroma backend '%s' "
+            "(upstream gate refuses ChromaDB SQLite recovery on Qdrant/Milvus/etc.)",
+            backend,
+            extra={
+                "backend": backend,
+                "palace_path": palace_path,
+                "skipped_reason": "from-sqlite only valid for chroma backend",
+            },
+        )
+        if original_error is not None:
+            return Left(original_error)
+        return Left(Error(
+            f"Palace repair skipped (backend='{backend}') - "
+            f"from-sqlite mode only valid for chroma backend"
+        ))
+
     try:
         proc = subprocess.run(
             ["mempalace", "repair", "--mode", "from-sqlite", "--yes", "--archive-existing", "--palace", palace_path],
@@ -142,7 +220,7 @@ def _repair_palace(palace_path: str) -> Either[Error, str]:
             timeout=600,
         )
     except FileNotFoundError:
-        return Left(Error("mempalace not found in PATH — cannot repair palace"))
+        return Left(Error("mempalace not found in PATH - cannot repair palace"))
     except subprocess.TimeoutExpired:
         return Left(Error("Palace repair timed out after 600s"))
 
@@ -158,12 +236,19 @@ def _repair_palace(palace_path: str) -> Either[Error, str]:
 def _delete_palace_drawers(
     palace_path: str,
     source_files: set[str],
-    extract_mode: str | None = "exchange",
+    extract_mode: str,
+    backend_hint: str | None = None,
 ) -> Either[Error, int]:
     """Delete drawers for given source files from the palace ChromaDB.
 
     Runs the ChromaDB operation in a **subprocess** to isolate segfaults
     from the HNSW segment writer (ChromaDB 1.5.8 known issue).
+
+    ``extract_mode`` is required (no default): ``"general"`` for classified
+    sync (``mempalace mine --extract general``), ``"exchange"`` otherwise.
+    The only caller (``BackfillApplication.sync``) passes it explicitly
+    so the wrong set of drawers is never silently targeted - see T9 in
+    ``.omo/plans/qdrant-backend-compatibility.md``.
 
     On segfault, attempts automatic palace repair via
     ``mempalace repair --mode from-sqlite`` before returning.
@@ -172,7 +257,7 @@ def _delete_palace_drawers(
         Right with count of deleted drawers (0 if segfault-repaired),
         or Left on error.
     """
-    result = _run_delete_drawers_subprocess(palace_path, source_files, extract_mode)
+    result = _run_delete_drawers_subprocess(palace_path, source_files, extract_mode, backend_hint)
 
     if result.is_right():
         return result
@@ -182,7 +267,11 @@ def _delete_palace_drawers(
     error_msg = str(result.value)
     if "segfault" in error_msg or "HNSW" in error_msg:
         logging.info("Attempting palace repair after deletion segfault...")
-        repair_result = _repair_palace(palace_path)
+        repair_result = _repair_palace(
+            palace_path,
+            backend_hint=backend_hint,
+            original_error=result.value,
+        )
         if repair_result.is_right():
             logging.info("Palace repaired — deletions not applied, will re-mine all files")
             return Right(0)
@@ -334,6 +423,7 @@ class BackfillApplication:
         dry_run: bool = False,
         db_path: str = None,
         wing: str | None = None,
+        backend: str | None = None,
     ) -> Either[Error, int]:
         try:
             if since is None and until is None:
@@ -450,6 +540,7 @@ class BackfillApplication:
         dry_run: bool = False,
         db_path: str = None,
         wing: str | None = None,
+        backend: str | None = None,
     ) -> Either[Error, int]:
         return BackfillApplication._export_sessions(
             log_prefix="Exporting",
@@ -458,6 +549,7 @@ class BackfillApplication:
             output_dir=output_dir, state_file=state_file,
             include_system_prompt=include_system_prompt,
             dry_run=dry_run, db_path=db_path, wing=wing,
+            backend=backend,
         )
 
     @staticmethod
@@ -468,6 +560,7 @@ class BackfillApplication:
         mempalace_db_path: str | None = None,
         mempalace_command: str | None = None,
         max_sessions: int | None = None,
+        backend: str | None = None,
     ) -> Either[Error, int]:
         try:
             inject.clear_and_configure(BackfillApplication._configure_injector)
@@ -488,6 +581,23 @@ class BackfillApplication:
             palace_path = _resolve_palace_path(config, mempalace_db_path)
             launcher = inject.instance(MineLauncherService)
             classifier = inject.instance(ClassifyPipeline)
+
+            if backend is not None:
+                logging.info("[backend] user override: %s", backend)
+            else:
+                logging.info("[backend] auto-detected from config")
+
+            resolver_result = BackendResolver().resolve(palace_path, backend)
+            if resolver_result.is_right():
+                resolved_backend: str = resolver_result.value
+                logging.info("[backend] resolved='%s' for palace='%s'", resolved_backend, palace_path)
+            else:
+                err = resolver_result.monoid[0]
+                logging.warning(
+                    "[backend] resolution failed (%s); using empty namespace for state scoping",
+                    err,
+                )
+                resolved_backend = ""
 
             if wing:
                 wing_dirs: dict[str, str] = {wing: output_dir}
@@ -525,8 +635,14 @@ class BackfillApplication:
                             len(modified_files),
                         )
 
-                # ── Step 2: Mine State — track hashes for dedup ─────────────
-                mine_state_repo = MineStateFileRepository(inject.instance(ConfigLoadService), w, source_dir=source)
+                # ── Step 2: Mine State — track hashes for dedup ───────────
+                mine_state_repo = MineStateFileRepository(
+                    inject.instance(ConfigLoadService),
+                    w,
+                    source_dir=source,
+                    backend=resolved_backend,
+                    palace_path=palace_path,
+                )
                 mine_state_result = mine_state_repo.load()
                 mine_state = mine_state_result.value if mine_state_result.is_right() else MineState()
 
@@ -562,17 +678,23 @@ class BackfillApplication:
                 else:
                     include_paths = files_to_mine
 
-                # ── Step 3: Delete stale palace drawers for modified files ──
+                # -- Step 3: Delete stale palace drawers for modified files --
                 # Only delete when NOT using a temp dir for mining (temp dirs
                 # create different source_file paths that don't match the
                 # original paths stored in the palace).
                 if modified_files and not dry_run and max_sessions is None and not include_paths:
+                    # T9: caller passes explicit extract_mode. Helper default is
+                    # "general" (T2) but relying on that leaves non-classified sync
+                    # silently wiping the wrong drawers. Resolution tied to the
+                    # only flag that flips mine mode: ``preclass_enabled``.
+                    extract_mode_to_use = "general" if preclass_enabled else "exchange"
                     logging.info(
-                        "Deleting stale palace drawers for %d modified file(s)",
-                        len(modified_files),
+                        "Deleting stale palace drawers for %d modified file(s) (extract_mode=%s)",
+                        len(modified_files), extract_mode_to_use,
                     )
                     delete_result = _delete_palace_drawers(
-                        palace_path, modified_files,
+                        palace_path, modified_files, extract_mode_to_use,
+                        backend_hint=backend,
                     )
                     if delete_result.is_left():
                         logging.warning(
@@ -592,6 +714,7 @@ class BackfillApplication:
                     launch_result = launcher.launch(
                         source_dir, w, dry_run,
                         extract_general=preclass_enabled,
+                        backend=resolved_backend,
                     )
                     if launch_result.is_left():
                         return launch_result
@@ -795,8 +918,14 @@ def export_cmd(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing files"),
     db_path: str = typer.Option(None, "--db-path", help="Override SQLite database path"),
     wing: str = typer.Option(None, "--wing", help="Target MemPalace wing (default: auto-detected from session project path)"),
+    backend: str | None = typer.Option(
+        None,
+        "--backend",
+        help="Override MemPalace backend (chroma or qdrant). Defaults to auto-detect from ~/.mempalace/config.json.",
+    ),
 ):
     """Export sessions to markdown files, organized by wing."""
+    backend = _validate_backend_cli(backend)
     if output_dir is None:
         output_dir = _DEFAULT_EXPORT_DIR
     if state_file is None:
@@ -814,6 +943,7 @@ def export_cmd(
         dry_run=dry_run,
         db_path=db_path,
         wing=wing,
+        backend=backend,
     )
     if result.is_left():
         err = result.monoid[0]
@@ -834,6 +964,11 @@ def sync_cmd(
     max_sessions: int | None = typer.Option(None, "--max-sessions", help="Maximum number of session files to mine (copies first N into a temp dir)"),
     mempalace_db_path: str = typer.Option(None, "--mempalace-db-path", help="Path to MemPalace palace database (maps to mempalace --palace)"),
     mempalace_command: str = typer.Option(None, "--mempalace-command", help="Override mempalace command path (for testing)"),
+    backend: str | None = typer.Option(
+        None,
+        "--backend",
+        help="Override MemPalace backend (chroma or qdrant). Defaults to auto-detect from ~/.mempalace/config.json.",
+    ),
 ):
     """Mine existing exported sessions into MemPalace.
 
@@ -845,7 +980,14 @@ def sync_cmd(
     When ``--max-sessions`` is set, a temp copy is still used to limit
     the number of files sent to the mine, and stale-drawer deletion is
     skipped (temp paths are ephemeral).
+
+    Use ``--backend`` to force a specific MemPalace backend
+    (``chroma`` or ``qdrant``) without editing ``~/.mempalace/config.json``.
+    The override is propagated to the ``mempalace`` subprocess via
+    ``MEMPALACE_BACKEND_EXPLICIT`` (and ``MEMPALACE_BACKEND`` for older
+    MemPalace versions).
     """
+    backend = _validate_backend_cli(backend)
     if output_dir is None:
         output_dir = _DEFAULT_EXPORT_DIR
     BackfillApplication._configure_logging()
@@ -856,6 +998,7 @@ def sync_cmd(
         max_sessions=max_sessions,
         mempalace_db_path=mempalace_db_path,
         mempalace_command=mempalace_command,
+        backend=backend,
     )
     if result.is_left():
         err = result.monoid[0]

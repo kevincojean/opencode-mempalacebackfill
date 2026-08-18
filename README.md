@@ -112,6 +112,17 @@ The patterns are case-insensitive and are merged with the built-in patterns — 
 
 - **`custom_patterns`** (optional): A dict of marker → list of regex patterns (see example above). Patterns are case-insensitive and merged with built-in patterns.
 
+### Backend override
+
+MemPalace supports multiple vector backends (`chroma`, `qdrant`). Use the `--backend` option on `sync` (and `export` for parity) to force a specific backend without editing `~/.mempalace/config.json`:
+
+```bash
+mempalace-backfill sync --backend qdrant
+mempalace-backfill sync --backend chroma
+```
+
+Allowed values are `chroma` and `qdrant`; any other value (e.g. `milvus`) is rejected at the CLI edge. When `--backend` is omitted, the backend is auto-detected from `~/.mempalace/config.json` (or defaults to `chroma`). The override is propagated to the `mempalace` subprocess via `MEMPALACE_BACKEND_EXPLICIT` (and `MEMPALACE_BACKEND` for older MemPalace versions).
+
 ## Execution and Parameters
 
 ### Commands
@@ -152,6 +163,7 @@ mempalace-backfill sync [OPTIONS]
 | `--wing` | Optional | `opencode-sessions` | MemPalace wing to mine into |
 | `--mempalace-db-path` | Optional | — | Path to MemPalace palace database (maps to `mempalace --palace`) |
 | `--mempalace-command` | Optional | `mempalace` | Override the mempalace command path (useful for testing with mock scripts) |
+| `--backend` | Optional | auto-detect | Override MemPalace backend (`chroma` or `qdrant`). Propagated via `MEMPALACE_BACKEND_EXPLICIT` to the `mempalace` subprocess |
 | `--dry-run` | Optional | `False` | Preview the mempalace command without executing |
 
 #### `clean`
