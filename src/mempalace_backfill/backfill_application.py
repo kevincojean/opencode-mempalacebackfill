@@ -23,10 +23,8 @@ from mempalace_backfill.export.content_normalization_service import ContentNorma
 from mempalace_backfill.export.markdown_conversion_service import MarkdownConversionService
 from mempalace_backfill.state.state_file_repository import ExportStateFileRepository, MineStateFileRepository, MineState
 from mempalace_backfill.mempalace.mine_launcher_service import MineLauncherService
-from mempalace_backfill.mempalace.backend_resolver import BackendResolver
 from mempalace_backfill.mempalace.backend_resolver import (
     BackendResolver,
-    BackendResolverError,
     _SUPPORTED_BACKENDS,
 )
 from mempalace_backfill.classify.classify_pipeline import ClassifyPipeline
@@ -1060,10 +1058,24 @@ def test_cmd(
 @app.command("reinstall")
 def reinstall_cmd(
     project_dir: str = typer.Argument(".", help="Path to project root (must contain pyproject.toml)"),
+    with_: list[str] = typer.Option(
+        ["chromadb"],
+        "--with",
+        help=(
+            "Extra packages to inject into the uv tool environment (repeatable). "
+            "Default: chromadb (ChromaDB backend). "
+            "Pass --with qdrant-client for Qdrant backend. "
+            "See README 'Backend compatibility' for details."
+        ),
+    ),
 ):
-    """Reinstall the tool from source (uv tool install . --force --reinstall)."""
+    """Reinstall the tool from source. Default injects ChromaDB; pass --with qdrant-client for Qdrant."""
     cmd = ["uv", "tool", "install", ".", "--force", "--reinstall"]
-    console.print(f"[cyan]Reinstalling from {project_dir}...[/cyan]")
+    for pkg in with_:
+        cmd.extend(["--with", pkg])
+    console.print(
+        f"[cyan]Reinstalling from {project_dir} (extras: {', '.join(with_)})...[/cyan]"
+    )
     result = subprocess.run(cmd, cwd=project_dir)
     if result.returncode == 0:
         console.print("[green]Reinstall complete.[/green]")

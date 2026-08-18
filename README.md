@@ -28,6 +28,20 @@ uv tool install .
 
 This makes the `mempalace-backfill` command available globally.
 
+### Backend-specific install
+
+For development or running tests, install the backend you plan to target:
+
+```bash
+# ChromaDB users (default, recommended)
+uv sync --extra chroma --group test
+
+# Qdrant users (alternative)
+uv sync --extra qdrant --group test
+```
+
+This installs the backend client plus pytest. Switch extras to change target backend.
+
 <details>
 <summary>Install via <code>pip</code></summary>
 
@@ -46,6 +60,67 @@ mempalace-backfill --help
 ```
 
 </details>
+
+## Backend compatibility
+
+MemPalace supports multiple vector backends. This project works with both ChromaDB and Qdrant, with different tradeoffs.
+
+### ChromaDB (recommended, tested)
+
+The default MemPalace backend. Recommended for single-machine setups.
+
+- ChromaDB ships as a `chroma` extra in `pyproject.toml`. Install via `uv sync --extra chroma`.
+- Local file-based storage, no separate server needed.
+- The default fallback when no backend is explicitly configured or auto-detected.
+
+### Qdrant (supported, alternative)
+
+Supported for server-mode deployments where you run Qdrant as a separate service.
+
+- `qdrant-client` is a test-only dependency in this project. Backfill never imports it directly.
+- Backfill uses MemPalace's public API for Qdrant, so the runtime is delegated to MemPalace.
+- Alternative path for multi-machine or production deployments.
+
+### Backend selection
+
+The backend is resolved in priority order (highest first):
+
+1. `--backend` CLI flag or `MEMPALACE_BACKEND_EXPLICIT` env var - explicit override.
+2. `~/.mempalace/config.json` `backend` field for the matching palace path.
+3. `MEMPALACE_BACKEND` env var (older MemPalace versions).
+4. On-disk artifact auto-detect (scan existing palace data).
+5. Default: `chroma`.
+
+```bash
+mempalace-backfill sync --backend qdrant
+mempalace-backfill sync --backend chroma
+```
+
+Allowed values are `chroma` and `qdrant`. Other values (e.g. `milvus`) are rejected at the CLI edge.
+
+### Qdrant setup
+
+See the [MemPalace docs](https://github.com/ohmyopenode/mempalace) for Qdrant server installation. The env vars below configure the client:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `MEMPALACE_QDRANT_URL` | Required | Qdrant server URL (e.g. `http://localhost:6333`). |
+| `MEMPALACE_QDRANT_API_KEY` | Optional | API key. **Env only. NEVER pass via argv.** |
+| `MEMPALACE_QDRANT_NAMESPACE` | Optional | Namespace for multi-tenancy. |
+
+Example:
+
+```bash
+export MEMPALACE_QDRANT_URL=http://localhost:6333
+export MEMPALACE_QDRANT_API_KEY=your-key
+mempalace-backfill sync --backend qdrant
+```
+
+If `--backend qdrant` is set without a running Qdrant server, the command fails with no silent fallback.
+
+### Migration
+
+Drawers are not portable between backends. Switching from ChromaDB to Qdrant on the same palace path starts a fresh palace. Re-run `mempalace-backfill sync` to populate it.
 
 ## Configuration
 
@@ -111,17 +186,6 @@ The built-in `MARKER_PATTERNS` cover generic keywords, but your personal style h
 The patterns are case-insensitive and are merged with the built-in patterns — you never lose default coverage.
 
 - **`custom_patterns`** (optional): A dict of marker → list of regex patterns (see example above). Patterns are case-insensitive and merged with built-in patterns.
-
-### Backend override
-
-MemPalace supports multiple vector backends (`chroma`, `qdrant`). Use the `--backend` option on `sync` (and `export` for parity) to force a specific backend without editing `~/.mempalace/config.json`:
-
-```bash
-mempalace-backfill sync --backend qdrant
-mempalace-backfill sync --backend chroma
-```
-
-Allowed values are `chroma` and `qdrant`; any other value (e.g. `milvus`) is rejected at the CLI edge. When `--backend` is omitted, the backend is auto-detected from `~/.mempalace/config.json` (or defaults to `chroma`). The override is propagated to the `mempalace` subprocess via `MEMPALACE_BACKEND_EXPLICIT` (and `MEMPALACE_BACKEND` for older MemPalace versions).
 
 ## Execution and Parameters
 
