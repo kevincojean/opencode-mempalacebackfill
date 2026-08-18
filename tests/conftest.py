@@ -35,3 +35,12 @@ def tmp_state():
     state_path = os.path.join(tmp_dir, "state.json")
     yield state_path
     shutil.rmtree(tmp_dir)
+
+
+@pytest.fixture
+def tmp_palace_chroma(tmp_path):
+    import uuid
+
+    palace = tmp_path / f"chroma_palace_{uuid.uuid4().hex[:12]}"
+    palace.mkdir(parents=True, exist_ok=True)
+    yield str(palace)

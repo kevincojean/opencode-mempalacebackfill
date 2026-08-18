@@ -1,10 +1,12 @@
 """Resolve the effective MemPalace backend for a given palace path.
 
 Precedence (MemPalace RFC 001 §3.3, as implemented by
-:func:`mempalace.backends.resolve_backend_for_palace`):
+:func:`mempalace.palace.resolve_backend_name`):
 
-    1. Explicit override (caller-supplied ``override`` argument)
-    2. Per-palace config value (read by MemPalace from ``~/.mempalace/config.json``)
+    1. Explicit override (caller-supplied ``override`` argument or
+       ``MEMPALACE_BACKEND_EXPLICIT`` env var)
+    2. Per-palace config value (read from ``~/.mempalace/config.json``)
+       ONLY when ``palace_path`` matches ``config.palace_path``
     3. ``MEMPALACE_BACKEND`` env var
     4. On-disk artifact auto-detection (migration / upgrade path only)
     5. Default: ``chroma``
@@ -15,6 +17,14 @@ Any other value - including ``milvus``, ``pgvector``, ``sqlite_exact``,
 or an unrecognised string passed explicitly - surfaces as
 ``Left(BackendResolverError(...))`` so callers cannot accidentally hand
 the rest of the pipeline a backend it does not know how to drive.
+
+We use the HIGH-LEVEL :func:`mempalace.palace.resolve_backend_name`
+rather than the lower-level :func:`mempalace.backends.resolve_backend_for_palace`
+because only the high-level variant consults ``MEMPALACE_BACKEND`` env,
+``~/.mempalace/config.json``, and per-palace config matching. The
+precedence matrix tests (``tests/e2e/test_e2e_backend_resolution.py``)
+exercise all four layers end-to-end, so the wrapper must delegate the
+full resolution chain - not just ``explicit`` + ``palace_path``.
 """
 
 import logging
@@ -24,7 +34,7 @@ from typing_extensions import final
 from pymonad.either import Either, Left, Right
 from pymonad.maybe import Just
 
-from mempalace.backends import resolve_backend_for_palace
+from mempalace.palace import resolve_backend_name
 from mempalace_backfill.alias import Error
 
 log = logging.getLogger(__name__)
@@ -51,9 +61,15 @@ class BackendResolver:
             palace_path, override,
         )
         try:
-            resolved: str = resolve_backend_for_palace(
+            # resolve_backend_name reads MEMPALACE_BACKEND_EXPLICIT,
+            # ~/.mempalace/config.json (per-palace), MEMPALACE_BACKEND,
+            # on-disk artifacts, and finally 'chroma' default. Passing
+            # explicit=override lets the caller (sync CLI) win via the
+            # --backend flag while still honouring config + env layers
+            # when --backend is None.
+            resolved: str = resolve_backend_name(
+                palace_path,
                 explicit=override,
-                palace_path=palace_path,
             )
         except Exception as e:
             log.info(
