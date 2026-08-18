@@ -1,4 +1,4 @@
-from typing import TypedDict
+from typing import TypedDict, Literal
 from typing_extensions import NotRequired
 
 
@@ -17,6 +17,7 @@ class MempalaceConfig(TypedDict):
     palace_path: NotRequired[str]
     wing: str
     command: NotRequired[str]
+    backend: NotRequired[Literal["chroma", "qdrant"]]
 
 
 class BackfillConfig(TypedDict):

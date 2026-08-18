@@ -21,14 +21,17 @@ Input JSON (via argv)::
 ``extract_mode`` defaults to ``"general"``; non-classified sync callers
 MUST pass ``"exchange"`` explicitly so stale orphans are not created.
 
-Output (stdout) - success::
+Output (stdout) is JSON, parsed by parent
+``_run_delete_drawers_subprocess`` (src/mempalace_backfill/backfill_application.py):
 
-    OK: deleted N drawers
+    Success (rc=0):
+        {"status": "ok", "deleted": N}
 
-Output (stderr) - errors::
+Output (stdout) on failure (exit code 1 or 2):
 
-    Error: palace not initialized: /path/to/palace   (exit code 2)
-    Error: <repr(exception)>                          (exit code 1)
+    {"status": "error", "message": "<reason>"}
+
+stderr carries human-readable diagnostic output via ``logging.error`` only.
 """
 
 from __future__ import annotations
@@ -39,19 +42,30 @@ import sys
 from typing import Any, Optional
 
 
+def _emit_error(message: str, exit_code: int) -> None:
+    """Emit a JSON error payload to stdout and exit.
+
+    Schema is consumed by ``_run_delete_drawers_subprocess`` in
+    ``backfill_application.py`` via ``json.loads(proc.stdout)``. The
+    ``message`` key is the contract; ``status`` discriminates ok/error.
+    """
+    payload = {"status": "error", "message": message}
+    logging.error("delete_drawers_helper: %s", message)
+    print(json.dumps(payload))
+    sys.exit(exit_code)
+
+
 def _run() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.info("delete_drawers_helper: starting")
 
     if len(sys.argv) < 2:
-        print("Error: missing JSON args argument", file=sys.stderr)
-        sys.exit(1)
+        _emit_error("missing JSON args argument", 1)
 
     try:
         args: dict[str, Any] = json.loads(sys.argv[1])
     except json.JSONDecodeError as exc:
-        print(f"Error: invalid JSON args: {exc}", file=sys.stderr)
-        sys.exit(1)
+        _emit_error(f"invalid JSON args: {exc}", 1)
 
     palace_path: Optional[str] = args.get("palace_path")
     source_files: list[str] = args.get("source_files", [])
@@ -59,11 +73,11 @@ def _run() -> None:
     backend_hint: Optional[str] = args.get("backend_hint")
 
     if not palace_path:
-        print("Error: missing palace_path", file=sys.stderr)
-        sys.exit(1)
+        _emit_error("missing palace_path", 1)
 
     if not source_files:
-        print("OK: deleted 0 drawers")
+        payload = {"status": "ok", "deleted": 0}
+        print(json.dumps(payload))
         logging.info("delete_drawers_helper: nothing to delete, exiting")
         return
 
@@ -71,8 +85,7 @@ def _run() -> None:
         from mempalace.backends.base import CollectionNotInitializedError, BaseCollection
         from mempalace.palace import get_collection
     except ImportError as exc:
-        print(f"Error: mempalace not available: {exc}", file=sys.stderr)
-        sys.exit(1)
+        _emit_error(f"mempalace not available: {exc}", 1)
 
     try:
         collection: BaseCollection = get_collection(
@@ -81,18 +94,13 @@ def _run() -> None:
             backend=backend_hint,
         )
     except CollectionNotInitializedError:
-        print(f"Error: palace not initialized: {palace_path}", file=sys.stderr)
-        logging.info("delete_drawers_helper: palace not initialized, exiting")
-        sys.exit(2)
+        _emit_error(f"palace not initialized: {palace_path}", 2)
     except FileNotFoundError as exc:
         # CollectionNotInitializedError subclasses FileNotFoundError; some
         # backends raise the parent directly when the palace dir/db is gone.
-        print(f"Error: palace not initialized: {palace_path} ({exc})", file=sys.stderr)
-        logging.info("delete_drawers_helper: palace not initialized, exiting")
-        sys.exit(2)
+        _emit_error(f"palace not initialized: {palace_path} ({exc})", 2)
     except Exception as exc:
-        print(f"Error: {exc!r}", file=sys.stderr)
-        sys.exit(1)
+        _emit_error(f"{exc!r}", 1)
 
     where: dict[str, Any] = {
         "source_file": {"$in": source_files},
@@ -102,18 +110,17 @@ def _run() -> None:
     try:
         result = collection.get(where=where)
     except Exception as exc:
-        print(f"Error: {exc!r}", file=sys.stderr)
-        sys.exit(1)
+        _emit_error(f"{exc!r}", 1)
 
     ids: list[str] = list(getattr(result, "ids", []) or [])
     if ids:
         try:
             collection.delete(ids=ids)
         except Exception as exc:
-            print(f"Error: {exc!r}", file=sys.stderr)
-            sys.exit(1)
+            _emit_error(f"{exc!r}", 1)
 
-    print(f"OK: deleted {len(ids)} drawers")
+    payload = {"status": "ok", "deleted": len(ids)}
+    print(json.dumps(payload))
     logging.info("delete_drawers_helper: deleted %d drawer(s), exiting", len(ids))
 
 
